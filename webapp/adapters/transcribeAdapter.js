@@ -89,7 +89,6 @@ async function startTranscriptionWithRetry(
           : getTranscribeMicStream(audioStream, sampleRate),
         EnablePartialResultsStabilization: enablePartialResultsStabilization,
         PartialResultsStability: enablePartialResultsStabilization ? partialResultStability : undefined,
-        VocabularyName: 'myvocab_01'
       });
 
       const transcribeClient = await transcribeClientGetter();
