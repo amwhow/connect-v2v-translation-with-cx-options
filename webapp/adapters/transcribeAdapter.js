@@ -58,6 +58,121 @@ export async function getAmazonTranscribeClientCustomer() {
   }
 }
 
+// ✅ NEW: Retry wrapper for WebSocket connections
+async function startTranscriptionWithRetry(
+  transcribeClientGetter,
+  audioStream,
+  sampleRate,
+  languageCode,
+  partialResultStability,
+  onFinalTranscribeEvent,
+  onPartialTranscribeEvent,
+  streamType // 'customer' or 'agent' for logging
+) {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAYS = [1000, 2000, 4000]; // Exponential backoff: 1s, 2s, 4s
+  
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      if (attempt > 0) {
+        console.log(`${LOGGER_PREFIX} - 🔄 Retrying ${streamType} transcription (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+      }
+      
+      const enablePartialResultsStabilization = TRANSCRIBE_PARTIAL_RESULTS_STABILITY.includes(partialResultStability);
+
+      const startStreamTranscriptionCommand = new StartStreamTranscriptionCommand({
+        LanguageCode: languageCode,
+        MediaEncoding: "pcm",
+        MediaSampleRateHertz: sampleRate,
+        AudioStream: streamType === 'customer' 
+          ? getTranscribeAudioStream(audioStream, sampleRate)
+          : getTranscribeMicStream(audioStream, sampleRate),
+        EnablePartialResultsStabilization: enablePartialResultsStabilization,
+        PartialResultsStability: enablePartialResultsStabilization ? partialResultStability : undefined,
+        VocabularyName: 'myvocab_01'
+      });
+
+      const transcribeClient = await transcribeClientGetter();
+      console.info(`${LOGGER_PREFIX} - 🔌 Opening ${streamType} WebSocket connection...`);
+      
+      const startStreamTranscriptionResponse = await transcribeClient.send(startStreamTranscriptionCommand);
+      
+      console.info(`${LOGGER_PREFIX} - ✓ ${streamType} WebSocket connected successfully`);
+      
+      let lastProcessedIndex = 0;
+
+      for await (const event of startStreamTranscriptionResponse.TranscriptResultStream) {
+        const transcriptResults = event.TranscriptEvent.Transcript.Results;
+
+        const getPartialTranscriptResult = getPartialTranscript(transcriptResults, lastProcessedIndex);
+        if (getPartialTranscriptResult != null) onPartialTranscribeEvent(getPartialTranscriptResult.partialTranscript);
+
+        const getFinalTranscriptResult = getFinalTranscript(transcriptResults, lastProcessedIndex, enablePartialResultsStabilization);
+        if (getFinalTranscriptResult != null) {
+          lastProcessedIndex = getFinalTranscriptResult.lastProcessedIndex;
+          onFinalTranscribeEvent(getFinalTranscriptResult.finalTranscript);
+        }
+      }
+      
+      // ✅ If we reach here, stream completed successfully
+      return;
+      
+    } catch (error) {
+      const isRetryable = isRetryableError(error);
+      const isLastAttempt = attempt === MAX_RETRIES - 1;
+      
+      if (isRetryable && !isLastAttempt) {
+        const delayMs = RETRY_DELAYS[attempt];
+        console.warn(`${LOGGER_PREFIX} - ⚠️ ${streamType} transcription failed: ${error.message}. Retrying in ${delayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue;
+      } else {
+        // ✅ Either not retryable or max retries exhausted
+        console.error(`${LOGGER_PREFIX} - ❌ ${streamType} transcription failed after ${attempt + 1} attempts:`, error);
+        throw new Error(getUserFriendlyErrorMessage(error));
+      }
+    }
+  }
+}
+
+// ✅ NEW: Determine if error is retryable
+function isRetryableError(error) {
+  const errorMessage = error.message?.toLowerCase() || '';
+  const errorName = error.name?.toLowerCase() || '';
+  
+  const retryablePatterns = [
+    'socket',
+    'timeout',
+    'network',
+    'econnreset',
+    'etimedout',
+    'enotfound',
+    'connection',
+    'websocket'
+  ];
+  
+  return retryablePatterns.some(pattern => 
+    errorMessage.includes(pattern) || errorName.includes(pattern)
+  );
+}
+
+// ✅ NEW: Convert technical errors to user-friendly messages
+function getUserFriendlyErrorMessage(error) {
+  const msg = error.message?.toLowerCase() || '';
+  
+  if (msg.includes('credentials') || msg.includes('forbidden') || msg.includes('unauthorized')) {
+    return 'Authentication failed. Please log out and log back in.';
+  }
+  if (msg.includes('network') || msg.includes('timeout') || msg.includes('socket')) {
+    return 'Network connection issue. Please check your internet connection and try again.';
+  }
+  if (msg.includes('websocket')) {
+    return 'Unable to establish transcription connection. Please refresh the page and try again.';
+  }
+  
+  return `Transcription error: ${error.message}`;
+}
+
 export async function startCustomerStreamTranscription(
   audioStream,
   sampleRate,
@@ -66,6 +181,7 @@ export async function startCustomerStreamTranscription(
   onFinalTranscribeEvent,
   onPartialTranscribeEvent
 ) {
+  // ✅ Validation remains the same
   if (isObjectUndefinedNullEmpty(audioStream)) throw new Error("audioStream is required");
   if (!Number.isInteger(sampleRate)) throw new Error("sampleRate is required as integer");
   if (isStringUndefinedNullEmpty(languageCode)) throw new Error("languageCode is required");
@@ -73,34 +189,17 @@ export async function startCustomerStreamTranscription(
   if (isFunction(onFinalTranscribeEvent)) throw new Error("onFinalTranscribeEvent is required");
   if (isFunction(onPartialTranscribeEvent)) throw new Error("onPartialTranscribeEvent is required");
 
-  const enablePartialResultsStabilization = TRANSCRIBE_PARTIAL_RESULTS_STABILITY.includes(partialResultStability);
-
-  const startStreamTranscriptionCommand = new StartStreamTranscriptionCommand({
-    LanguageCode: languageCode,
-    MediaEncoding: "pcm",
-    MediaSampleRateHertz: sampleRate,
-    AudioStream: getTranscribeAudioStream(audioStream, sampleRate),
-    EnablePartialResultsStabilization: enablePartialResultsStabilization,
-    PartialResultsStability: enablePartialResultsStabilization ? partialResultStability : undefined,
-  });
-
-  const amazonTranscribeClientCustomer = await getAmazonTranscribeClientCustomer();
-  const startStreamTranscriptionResponse = await amazonTranscribeClientCustomer.send(startStreamTranscriptionCommand);
-
-  let lastProcessedIndex = 0;
-
-  for await (const event of startStreamTranscriptionResponse.TranscriptResultStream) {
-    const transcriptResults = event.TranscriptEvent.Transcript.Results;
-
-    const getPartialTranscriptResult = getPartialTranscript(transcriptResults, lastProcessedIndex);
-    if (getPartialTranscriptResult != null) onPartialTranscribeEvent(getPartialTranscriptResult.partialTranscript);
-
-    const getFinalTranscriptResult = getFinalTranscript(transcriptResults, lastProcessedIndex, enablePartialResultsStabilization);
-    if (getFinalTranscriptResult != null) {
-      lastProcessedIndex = getFinalTranscriptResult.lastProcessedIndex;
-      onFinalTranscribeEvent(getFinalTranscriptResult.finalTranscript);
-    }
-  }
+  // ✅ NEW: Use retry wrapper
+  return await startTranscriptionWithRetry(
+    getAmazonTranscribeClientCustomer,
+    audioStream,
+    sampleRate,
+    languageCode,
+    partialResultStability,
+    onFinalTranscribeEvent,
+    onPartialTranscribeEvent,
+    'customer'
+  );
 }
 
 export async function startAgentStreamTranscription(
@@ -111,6 +210,7 @@ export async function startAgentStreamTranscription(
   onFinalTranscribeEvent,
   onPartialTranscribeEvent
 ) {
+  // ✅ Validation remains the same
   if (isObjectUndefinedNullEmpty(audioStream)) throw new Error("audioStream is required");
   if (!Number.isInteger(sampleRate)) throw new Error("sampleRate is required as integer");
   if (isStringUndefinedNullEmpty(languageCode)) throw new Error("languageCode is required");
@@ -118,34 +218,17 @@ export async function startAgentStreamTranscription(
   if (isFunction(onFinalTranscribeEvent)) throw new Error("onFinalTranscribeEvent is required");
   if (isFunction(onPartialTranscribeEvent)) throw new Error("onPartialTranscribeEvent is required");
 
-  const enablePartialResultsStabilization = TRANSCRIBE_PARTIAL_RESULTS_STABILITY.includes(partialResultStability);
-
-  const startStreamTranscriptionCommand = new StartStreamTranscriptionCommand({
-    LanguageCode: languageCode,
-    MediaEncoding: "pcm",
-    MediaSampleRateHertz: sampleRate,
-    AudioStream: getTranscribeMicStream(audioStream, sampleRate),
-    EnablePartialResultsStabilization: enablePartialResultsStabilization,
-    PartialResultsStability: enablePartialResultsStabilization ? partialResultStability : undefined,
-  });
-
-  const amazonTranscribeClientAgent = await getAmazonTranscribeClientAgent();
-  const startStreamTranscriptionResponse = await amazonTranscribeClientAgent.send(startStreamTranscriptionCommand);
-
-  let lastProcessedIndex = 0;
-
-  for await (const event of startStreamTranscriptionResponse.TranscriptResultStream) {
-    const transcriptResults = event.TranscriptEvent.Transcript.Results;
-
-    const getPartialTranscriptResult = getPartialTranscript(transcriptResults, lastProcessedIndex);
-    if (getPartialTranscriptResult != null) onPartialTranscribeEvent(getPartialTranscriptResult.partialTranscript);
-
-    const getFinalTranscriptResult = getFinalTranscript(transcriptResults, lastProcessedIndex, enablePartialResultsStabilization);
-    if (getFinalTranscriptResult != null) {
-      lastProcessedIndex = getFinalTranscriptResult.lastProcessedIndex;
-      onFinalTranscribeEvent(getFinalTranscriptResult.finalTranscript);
-    }
-  }
+  // ✅ NEW: Use retry wrapper
+  return await startTranscriptionWithRetry(
+    getAmazonTranscribeClientAgent,
+    audioStream,
+    sampleRate,
+    languageCode,
+    partialResultStability,
+    onFinalTranscribeEvent,
+    onPartialTranscribeEvent,
+    'agent'
+  );
 }
 
 function getPartialTranscript(transcriptResults = [], lastProcessedIndex = 0) {
