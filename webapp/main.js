@@ -11,7 +11,9 @@ import {
   AUDIO_FEEDBACK_FILE_PATH,
   CUSTOMER_TRANSLATION_TO_CUSTOMER_VOLUME,
   LOGGER_PREFIX,
+  TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS,
   TRANSCRIBE_PARTIAL_RESULTS_STABILITY,
+  TRANSCRIBE_TARGET_SAMPLE_RATE,
 } from "./constants";
 import { getLoginUrl, getValidTokens, handleRedirect, isAuthenticated, logout, setRedirectURI, startTokenRefreshTimer } from "./utils/authUtility";
 import { AudioStreamManager } from "./managers/AudioStreamManager";
@@ -31,6 +33,8 @@ let CCP_V2V = {};
 let CurrentAgentConnectionId;
 let ConnectSoftPhoneManager;
 let IsAgentTranscriptionMuted = false;
+let IsCustomerTranscribing = false;
+let IsAgentTranscribing = false;
 
 // AudioContextManager to manage the AudioContext
 let AudioContextMgr = new AudioContextManager();
@@ -756,209 +760,74 @@ function loadTranscribePartialResultsStability() {
 
 //Creates Customer Speaker Stream used as input for Amazon Transcribe when transcribing customer's voice
 async function captureFromCustomerAudioStream() {
-  const MAX_RETRIES = 5; // Try for 5 seconds (10 x 500ms)
-  const RETRY_INTERVAL_MS = 500;
-  
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const session = ConnectSoftPhoneManager?.getSession(CurrentAgentConnectionId);
-    const audioStream = session?._remoteAudioStream;
-    
-    // ✅ Check if stream exists AND has audio tracks
-    if (audioStream != null) {
-      const audioTracks = audioStream.getAudioTracks();
-      
-      if (audioTracks.length > 0) {
-        // ✅ Verify tracks are in 'live' state
-        const hasLiveTrack = audioTracks.some(track => track.readyState === 'live');
-        
-        if (hasLiveTrack) {
-          // ✅ SUCCESS - Stream is ready
-          console.info(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - ✓ Customer audio stream acquired on attempt ${attempt + 1}`);
-          console.info(`${LOGGER_PREFIX} - Customer audio tracks:`, audioTracks.map(t => ({
-            id: t.id,
-            label: t.label,
-            enabled: t.enabled,
-            readyState: t.readyState
-          })));
-          
-          const amazonTranscribeFromCustomerAudioStream = new MicrophoneStream();
-          amazonTranscribeFromCustomerAudioStream.setStream(audioStream);
-          return amazonTranscribeFromCustomerAudioStream;
-        } else {
-          console.warn(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - ⚠️ Stream has ${audioTracks.length} audio track(s) but none are 'live' (attempt ${attempt + 1}/${MAX_RETRIES})`);
-        }
-      } else {
-        console.warn(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - ⚠️ Stream exists but has no audio tracks (attempt ${attempt + 1}/${MAX_RETRIES})`);
-      }
-    } else {
-      console.warn(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - ⚠️ Remote audio stream not yet available (attempt ${attempt + 1}/${MAX_RETRIES})`);
-    }
-    
-    // ✅ Wait before retrying
-    if (attempt < MAX_RETRIES - 1) {
-      await new Promise(resolve => setTimeout(resolve, RETRY_INTERVAL_MS));
-    }
+  const session = ConnectSoftPhoneManager?.getSession(CurrentAgentConnectionId);
+  const audioStream = session?._remoteAudioStream;
+  if (audioStream == null) {
+    console.error(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - No audio stream found from customer`);
+    throw new Error("No audio stream found from customer, please check you browser sound settings");
   }
-  
-  // ✅ All retries exhausted - provide detailed troubleshooting
-  console.error(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - ❌ Failed to acquire customer audio stream after ${MAX_RETRIES} attempts`);
-  
-  // ✅ Log diagnostic information
-  logCustomerAudioDiagnostics();
-  
-  throw new Error(
-    "Unable to access customer audio stream after 5 seconds. " +
-    "This may be due to:\n" +
-    "1. Amazon Connect security profile missing 'Access customer audio streams' permission\n" +
-    "2. Call not fully connected yet - wait a moment and try again\n" +
-    "3. Browser audio permissions blocked\n\n" +
-    "Please check the browser console for detailed diagnostic information."
-  );
-}
 
-// ✅ NEW: Diagnostic logging function
-function logCustomerAudioDiagnostics() {
-  console.group('🔍 Customer Audio Stream Diagnostics');
-  
-  try {
-    const session = ConnectSoftPhoneManager?.getSession(CurrentAgentConnectionId);
-    console.log('Session exists:', session != null);
-    
-    if (session) {
-      console.log('Session state:', session.sessionState);
-      console.log('Remote audio stream:', session._remoteAudioStream != null ? '✓ Present' : '✗ Missing');
-      
-      if (session._remoteAudioStream) {
-        const tracks = session._remoteAudioStream.getAudioTracks();
-        console.log('Audio tracks count:', tracks.length);
-        tracks.forEach((track, i) => {
-          console.log(`  Track ${i}:`, {
-            id: track.id,
-            kind: track.kind,
-            label: track.label,
-            enabled: track.enabled,
-            muted: track.muted,
-            readyState: track.readyState
-          });
-        });
-      }
-      
-      // Check WebRTC PeerConnection
-      if (session._pc) {
-        console.log('PeerConnection:', {
-          connectionState: session._pc.connectionState,
-          iceConnectionState: session._pc.iceConnectionState,
-          signalingState: session._pc.signalingState
-        });
-        
-        const receivers = session._pc.getReceivers();
-        console.log('Receivers count:', receivers.length);
-        receivers.forEach((receiver, i) => {
-          console.log(`  Receiver ${i}:`, receiver.track ? {
-            kind: receiver.track.kind,
-            readyState: receiver.track.readyState
-          } : 'No track');
-        });
-      }
-    }
-    
-    console.log('ConnectSoftPhoneManager exists:', ConnectSoftPhoneManager != null);
-    console.log('CurrentAgentConnectionId:', CurrentAgentConnectionId);
-    
-  } catch (e) {
-    console.error('Error gathering diagnostics:', e);
-  }
-  
-  console.groupEnd();
+  const audioContext = await getAudioContext();
+  const amazonTranscribeFromCustomerAudioStream = new MicrophoneStream({ audioContext });
+  amazonTranscribeFromCustomerAudioStream.setStream(audioStream);
+  return amazonTranscribeFromCustomerAudioStream;
 }
 
 async function customerStartTranscription() {
   try {
-    // ✅ NEW: Disable button immediately to prevent double-clicks
-    CCP_V2V.UI.customerStartTranscriptionButton.disabled = true;
-    CCP_V2V.UI.customerStartTranscriptionButton.textContent = 'Starting...';
-    
-    // ✅ NEW: Pre-flight validation
-    if (!CurrentAgentConnectionId) {
-      throw new Error('No active call connection. Please ensure a call is in progress.');
-    }
-    
-    if (!CCP_V2V.UI.customerTranscribeLanguageSelect.value) {
-      throw new Error('Please select a customer language.');
-    }
-    
+    IsCustomerTranscribing = true;
     if (CCP_V2V.UI.customerStreamMicCheckbox.checked === true) {
+      //we want agent to hear the customer's original voice, so we reduce the fromCustomerAudioElement volume
       CCP_V2V.UI.fromCustomerAudioElement.volume = 0.3;
     } else {
+      //we don't want agent to hear the customer's original voice, so we mute the fromCustomerAudioElement
       CCP_V2V.UI.fromCustomerAudioElement.muted = true;
     }
 
+    //Play the audio feedback to customer
     if (CCP_V2V.UI.customerAudioFeedbackEnabledCheckbox.checked === true) {
       ToCustomerAudioStreamManager.enableAudioFeedback(AUDIO_FEEDBACK_FILE_PATH);
     }
 
+    //Get ready to stream To Customer
     const toCustomerAudioTrack = ToCustomerAudioStreamManager.getAudioTrack();
     RTCSessionTrackManager.replaceTrack(toCustomerAudioTrack, TrackType.POLLY);
 
-    console.info(`${LOGGER_PREFIX} - customerStartTranscription - 🎤 Acquiring customer audio stream...`);
+    //getting the remote audio stream from the current RTC session into AmazonTranscribeFromCustomerAudioStream variable
     AmazonTranscribeFromCustomerAudioStream = await captureFromCustomerAudioStream();
-    
-    const customerStreamSampleRate = AudioContextMgr.getActualSampleRate();
-    console.info(`${LOGGER_PREFIX} - customerStartTranscription - Sample Rate: ${customerStreamSampleRate}`);
+    const customerStreamSampleRate = (await getAudioContext()).sampleRate;
+    const customerTargetSampleRate = getAutoSelectedSampleRate(customerStreamSampleRate);
+    console.info(
+      `${LOGGER_PREFIX} - customerStartTranscription - AmazonTranscribeFromCustomerAudioStream Sample Rate: ${customerStreamSampleRate}, target: ${customerTargetSampleRate}`
+    );
 
-    console.info(`${LOGGER_PREFIX} - customerStartTranscription - 🔌 Starting Transcribe WebSocket connection...`);
-    
-    // ✅ ENHANCED: Wrap the transcription call to catch errors from the async iterator
-    try {
-      await startCustomerStreamTranscription(
-        AmazonTranscribeFromCustomerAudioStream,
-        customerStreamSampleRate,
-        CCP_V2V.UI.customerTranscribeLanguageSelect.value,
-        CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.value,
-        handleCustomerTranscript,
-        handleCustomerPartialTranscript
-      );
-    } catch (transcribeError) {
-      // ✅ NEW: Catch errors from the transcription stream
-      console.error(`${LOGGER_PREFIX} - customerStartTranscription - Transcription stream error:`, transcribeError);
-      throw new Error(`Transcription connection failed: ${transcribeError.message}`);
-    }
+    startCustomerStreamTranscription(
+      AmazonTranscribeFromCustomerAudioStream,
+      customerStreamSampleRate,
+      CCP_V2V.UI.customerTranscribeLanguageSelect.value,
+      CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.value,
+      handleCustomerTranscript,
+      handleCustomerPartialTranscript,
+      {
+        shouldStop: () => !IsCustomerTranscribing,
+        onRetry: (details) => handleTranscribeRetry("customer", details),
+        targetSampleRate: customerTargetSampleRate,
+      }
+    );
 
-    // ✅ Success - update UI
     CCP_V2V.UI.customerTranscribeLanguageSelect.disabled = true;
     CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.disabled = true;
-    CCP_V2V.UI.customerStartTranscriptionButton.textContent = 'Start Transcription';
+    CCP_V2V.UI.customerStartTranscriptionButton.disabled = true;
     CCP_V2V.UI.customerStopTranscriptionButton.disabled = false;
-    
-    console.info(`${LOGGER_PREFIX} - customerStartTranscription - ✓ Customer transcription started successfully`);
-    
   } catch (error) {
-    console.error(`${LOGGER_PREFIX} - customerStartTranscription - ❌ Error:`, error);
-    
-    // ✅ NEW: Clean up on error
-    if (AmazonTranscribeFromCustomerAudioStream) {
-      try {
-        const audioContext = await getAudioContext();
-        const silentStream = audioContext.createMediaStreamDestination().stream;
-        AmazonTranscribeFromCustomerAudioStream.setStream(silentStream);
-        AmazonTranscribeFromCustomerAudioStream.stop();
-        AmazonTranscribeFromCustomerAudioStream.destroy();
-        AmazonTranscribeFromCustomerAudioStream = undefined;
-      } catch (cleanupError) {
-        console.error(`${LOGGER_PREFIX} - customerStartTranscription - Cleanup error:`, cleanupError);
-      }
-    }
-    
-    // ✅ NEW: Re-enable button on error
-    CCP_V2V.UI.customerStartTranscriptionButton.disabled = false;
-    CCP_V2V.UI.customerStartTranscriptionButton.textContent = 'Start Transcription';
-    
-    // ✅ ENHANCED: Better error message
-    raiseError(`Failed to start customer transcription: ${error.message}\n\nPlease check the console for details.`);
+    console.error(`${LOGGER_PREFIX} - customerStartTranscription - Error starting customer transcription:`, error);
+    raiseError(`Error starting customer transcription: ${error}`);
+    IsCustomerTranscribing = false;
   }
 }
 
 async function customerStopTranscription() {
+  IsCustomerTranscribing = false;
   if (AmazonTranscribeFromCustomerAudioStream) {
     //replace the stream with a silent stream
     const audioContext = await getAudioContext();
@@ -980,26 +849,15 @@ async function customerStopTranscription() {
 
 async function agentStartTranscription() {
   try {
-    // ✅ NEW: Disable button immediately
-    CCP_V2V.UI.agentStartTranscriptionButton.disabled = true;
-    CCP_V2V.UI.agentStartTranscriptionButton.textContent = 'Starting...';
-    
-    // ✅ NEW: Pre-flight validation
+    IsAgentTranscribing = true;
     const selectedMic = CCP_V2V.UI.micSelect.value;
-    if (!selectedMic) {
-      throw new Error('Please select a microphone device.');
-    }
-    
-    if (!CCP_V2V.UI.agentTranscribeLanguageSelect.value) {
-      throw new Error('Please select an agent language.');
-    }
-    
     const micConstraints = getMicrophoneConstraints(selectedMic);
 
     if (CCP_V2V.UI.agentAudioFeedbackEnabledCheckbox.checked === true) {
       ToAgentAudioStreamManager.enableAudioFeedback(AUDIO_FEEDBACK_FILE_PATH);
     }
 
+    //Get ready to stream To Customer
     const toCustomerAudioTrack = ToCustomerAudioStreamManager.getAudioTrack();
     RTCSessionTrackManager.replaceTrack(toCustomerAudioTrack, TrackType.POLLY);
 
@@ -1009,79 +867,44 @@ async function agentStartTranscription() {
       ToCustomerAudioStreamManager.setMicrophoneVolume(micVolume);
     }
 
-    console.info(`${LOGGER_PREFIX} - agentStartTranscription - 🎤 Accessing microphone...`);
-    
-    // ✅ ENHANCED: Catch microphone access errors specifically
-    try {
-      AmazonTranscribeToCustomerAudioStream = await createMicrophoneStream(micConstraints);
-    } catch (micError) {
-      if (micError.name === 'NotAllowedError') {
-        throw new Error('Microphone access denied. Please allow microphone access in your browser.');
-      } else if (micError.name === 'NotFoundError') {
-        throw new Error('Microphone not found. Please connect a microphone and refresh.');
-      } else if (micError.name === 'NotReadableError') {
-        throw new Error('Microphone is in use by another application (Teams, Zoom, etc). Please close other apps and try again.');
-      } else {
-        throw new Error(`Microphone error: ${micError.message}`);
+    //getting the local Mic stream into AmazonTranscribeMicStream variable
+    const audioContext = await getAudioContext();
+    AmazonTranscribeToCustomerAudioStream = await createMicrophoneStream(micConstraints, audioContext);
+    const agentStreamSampleRate = audioContext.sampleRate;
+    const agentTargetSampleRate = getAutoSelectedSampleRate(agentStreamSampleRate);
+    console.info(
+      `${LOGGER_PREFIX} - agentStartTranscription - AmazonTranscribeToCustomerAudioStream Sample Rate: ${agentStreamSampleRate}, target: ${agentTargetSampleRate}`
+    );
+
+    startAgentStreamTranscription(
+      AmazonTranscribeToCustomerAudioStream,
+      agentStreamSampleRate,
+      CCP_V2V.UI.agentTranscribeLanguageSelect.value,
+      CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.value,
+      handleAgentTranscript,
+      handleAgentPartialTranscript,
+      {
+        shouldStop: () => !IsAgentTranscribing,
+        onRetry: (details) => handleTranscribeRetry("agent", details),
+        targetSampleRate: agentTargetSampleRate,
       }
-    }
-    
-    const agentStreamSampleRate = AudioContextMgr.getActualSampleRate();
-    console.info(`${LOGGER_PREFIX} - agentStartTranscription - Sample Rate: ${agentStreamSampleRate}`);
+    );
 
-    console.info(`${LOGGER_PREFIX} - agentStartTranscription - 🔌 Starting Transcribe WebSocket connection...`);
-    
-    // ✅ ENHANCED: Wrap the transcription call to catch errors
-    try {
-      await startAgentStreamTranscription(
-        AmazonTranscribeToCustomerAudioStream,
-        agentStreamSampleRate,
-        CCP_V2V.UI.agentTranscribeLanguageSelect.value,
-        CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.value,
-        handleAgentTranscript,
-        handleAgentPartialTranscript
-      );
-    } catch (transcribeError) {
-      console.error(`${LOGGER_PREFIX} - agentStartTranscription - Transcription stream error:`, transcribeError);
-      throw new Error(`Transcription connection failed: ${transcribeError.message}`);
-    }
-
-    // ✅ Success - update UI
     CCP_V2V.UI.agentTranscribeLanguageSelect.disabled = true;
     CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.disabled = true;
-    CCP_V2V.UI.agentStartTranscriptionButton.textContent = 'Start Transcription';
+    CCP_V2V.UI.agentStartTranscriptionButton.disabled = true;
     CCP_V2V.UI.agentStopTranscriptionButton.disabled = false;
 
     disableMicrophoneAndSpeakerSelection();
-    
-    console.info(`${LOGGER_PREFIX} - agentStartTranscription - ✓ Agent transcription started successfully`);
-    
   } catch (error) {
-    console.error(`${LOGGER_PREFIX} - agentStartTranscription - ❌ Error:`, error);
-    
-    // ✅ NEW: Clean up on error
-    if (AmazonTranscribeToCustomerAudioStream) {
-      try {
-        const audioContext = await getAudioContext();
-        const silentStream = audioContext.createMediaStreamDestination().stream;
-        AmazonTranscribeToCustomerAudioStream.setStream(silentStream);
-        AmazonTranscribeToCustomerAudioStream.stop();
-        AmazonTranscribeToCustomerAudioStream.destroy();
-        AmazonTranscribeToCustomerAudioStream = undefined;
-      } catch (cleanupError) {
-        console.error(`${LOGGER_PREFIX} - agentStartTranscription - Cleanup error:`, cleanupError);
-      }
-    }
-    
-    // ✅ NEW: Re-enable button on error
-    CCP_V2V.UI.agentStartTranscriptionButton.disabled = false;
-    CCP_V2V.UI.agentStartTranscriptionButton.textContent = 'Start Transcription';
-    
-    raiseError(`Failed to start agent transcription: ${error.message}\n\nPlease check the console for details.`);
+    console.error(`${LOGGER_PREFIX} - agentStartTranscription - Error starting agent transcription:`, error);
+    raiseError(`Error starting agent transcription: ${error}`);
+    IsAgentTranscribing = false;
   }
 }
 
 async function agentStopTranscription() {
+  IsAgentTranscribing = false;
   if (AmazonTranscribeToCustomerAudioStream) {
     //replace the stream with a silent stream
     const audioContext = await getAudioContext();
@@ -1478,6 +1301,48 @@ function addTranscriptCard(originalTranscript, translatedTranscript, type) {
 
   // Auto scroll to the bottom
   CCP_V2V.UI.divTranscriptContainer.scrollTop = CCP_V2V.UI.divTranscriptContainer.scrollHeight;
+}
+
+function getAutoSelectedSampleRate(inputSampleRate) {
+  try {
+    const navigatorRef = typeof navigator !== "undefined" ? navigator : null;
+    const connection = navigatorRef?.connection || navigatorRef?.mozConnection || navigatorRef?.webkitConnection;
+    if (!connection) {
+      return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+    }
+
+    const { effectiveType, downlink, rtt, saveData } = connection;
+    if (saveData === true) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "slow-2g" || effectiveType === "2g") {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "3g" || (typeof downlink === "number" && downlink < 1.5) || (typeof rtt === "number" && rtt > 300)) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.medium);
+    }
+
+    return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.high);
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - getAutoSelectedSampleRate - Falling back to default sample rate`, error);
+    return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+  }
+}
+
+function handleTranscribeRetry(target, details) {
+  const message = `Reconnecting transcription (attempt ${details.attempt})...`;
+  if (target === "customer") {
+    setBackgroundColour(CCP_V2V.UI.customerTranscriptionTextOutputDiv, "bg-pale-yellow");
+    CCP_V2V.UI.customerTranscriptionTextOutputDiv.textContent = message;
+    return;
+  }
+
+  if (target === "agent") {
+    setBackgroundColour(CCP_V2V.UI.agentTranscriptionTextOutputDiv, "bg-pale-yellow");
+    CCP_V2V.UI.agentTranscriptionTextOutputDiv.textContent = message;
+  }
 }
 
 function clearTranscriptCards() {
