@@ -11,6 +11,10 @@ export const CONNECT_CONFIG = {
   connectInstanceRegion: getParamValue(window.WebappConfig.connectInstanceRegion),
 };
 
+export const CONNECT_AUTH_CONFIG = {
+  connectAuthApiUrl: getParamValue(window.WebappConfig.connectAuthApiUrl),
+};
+
 export const TRANSCRIBE_CONFIG = {
   transcribeRegion: getParamValue(window.WebappConfig.transcribeRegion),
 };
