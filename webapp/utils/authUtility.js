@@ -1,6 +1,6 @@
 // Copyright 2025 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: MIT-0
-import { COGNITO_CONFIG } from "../config";
+import { COGNITO_CONFIG, CONNECT_AUTH_CONFIG } from "../config";
 import { LOGGER_PREFIX } from "../constants";
 
 export function setRedirectURI(redirectURI) {
@@ -47,6 +47,28 @@ export async function handleRedirect() {
     }
   }
   return false;
+}
+
+export async function getConnectAgentCredentials({ agentArn, agentUsername }) {
+  if (!CONNECT_AUTH_CONFIG.connectAuthApiUrl) {
+    throw new Error("Connect auth API URL is not configured.");
+  }
+  const response = await fetch(`${CONNECT_AUTH_CONFIG.connectAuthApiUrl}connect-agent-credentials`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ agentArn, agentUsername }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Connect agent auth failed: ${errorText}`);
+  }
+
+  const credentials = await response.json();
+  setAwsCredentials(credentials);
+  return credentials;
 }
 
 // Exchange authorization code for tokens

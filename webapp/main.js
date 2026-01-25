@@ -18,7 +18,7 @@ import {
 import {
   getLoginUrl,
   getValidTokens,
-  getValidAwsCredentials,
+  getConnectAgentCredentials,
   handleRedirect,
   isAuthenticated,
   logout,
@@ -186,9 +186,7 @@ async function initializeApp() {
       return;
     }
 
-    if (embeddedConnectApp) {
-      await getValidAwsCredentials();
-    } else if (!isAuthenticated()) {
+    if (!embeddedConnectApp && !isAuthenticated()) {
       const tokens = await getValidTokens();
       if (tokens?.accessToken == null || tokens?.idToken == null || tokens?.refreshToken == null) {
         // No valid token available, redirect to login
@@ -348,6 +346,10 @@ const onConnectInitialized = (connectAgent) => {
 
   const connectAgentConfiguration = connectAgent.getConfiguration();
   CurrentUser["currentUser_ConnectUsername"] = connectAgentConfiguration.username;
+  ensureConnectAgentCredentials(connectAgent, connectAgentConfiguration).catch((error) => {
+    console.error(`${LOGGER_PREFIX} - onConnectInitialized - Error authenticating Connect agent:`, error);
+    raiseError("Unable to authenticate Connect agent. Please refresh the page.");
+  });
 
   subscribeToAgentEvents();
   subscribeToContactEvents();
@@ -357,6 +359,24 @@ const onConnectInitialized = (connectAgent) => {
     //console.info(`${LOGGER_PREFIX} - softphoneManager`, softphoneManager);
   });
 };
+
+async function ensureConnectAgentCredentials(connectAgent, connectAgentConfiguration) {
+  if (!isEmbeddedConnectApp()) {
+    return;
+  }
+
+  const agentArn =
+    (typeof connectAgent.getAgentARN === "function" && connectAgent.getAgentARN()) ||
+    connectAgentConfiguration?.agentArn ||
+    connectAgentConfiguration?.agentARN;
+  const agentUsername = connectAgentConfiguration?.username;
+
+  if (!agentArn || !agentUsername) {
+    throw new Error("Connect agent metadata is missing.");
+  }
+
+  await getConnectAgentCredentials({ agentArn, agentUsername });
+}
 
 function subscribeToAgentEvents() {
   // Subscribe to Agent Events from Streams API, and handle Agent events with functions defined above

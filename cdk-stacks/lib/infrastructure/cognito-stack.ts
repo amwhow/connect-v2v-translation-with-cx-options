@@ -79,7 +79,7 @@ export class CognitoStack extends cdk.NestedStack {
     //create an Identity Pool
     const identityPool = new cognito.CfnIdentityPool(this, "IdentityPool", {
       identityPoolName: `${props.cdkAppName}-IdentityPool`,
-      allowUnauthenticatedIdentities: true,
+      allowUnauthenticatedIdentities: false,
       cognitoIdentityProviders: [
         {
           clientId: userPoolClient.userPoolClientId,
