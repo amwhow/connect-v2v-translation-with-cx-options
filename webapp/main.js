@@ -11,15 +11,17 @@ import {
   AUDIO_FEEDBACK_FILE_PATH,
   CUSTOMER_TRANSLATION_TO_CUSTOMER_VOLUME,
   LOGGER_PREFIX,
+  TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS,
   TRANSCRIBE_PARTIAL_RESULTS_STABILITY,
+  TRANSCRIBE_TARGET_SAMPLE_RATE,
 } from "./constants";
 import { getLoginUrl, getValidTokens, handleRedirect, isAuthenticated, logout, setRedirectURI, startTokenRefreshTimer } from "./utils/authUtility";
 import { AudioStreamManager } from "./managers/AudioStreamManager";
 import { SessionTrackManager, TrackType } from "./managers/SessionTrackManager";
 import { createMicrophoneStream } from "./utils/transcribeUtils";
-import { listTranslateLanguages, translateText } from "./adapters/translateAdapter";
-import { describeVoices, listPollyEngines, listPollyLanguages, synthesizeSpeech } from "./adapters/pollyAdapter";
-import { listStreamingLanguages, startAgentStreamTranscription, startCustomerStreamTranscription } from "./adapters/transcribeAdapter";
+import { translateText } from "./adapters/translateAdapter";
+import { synthesizeSpeech } from "./adapters/pollyAdapter";
+import { startAgentStreamTranscription, startCustomerStreamTranscription } from "./adapters/transcribeAdapter";
 import { CONNECT_CONFIG } from "./config";
 import { AudioContextManager } from "./managers/AudioContextManager";
 import { AudioInputTestManager } from "./managers/InputTestManager";
@@ -30,7 +32,66 @@ let CCP_V2V = {};
 
 let CurrentAgentConnectionId;
 let ConnectSoftPhoneManager;
-let IsAgentTranscriptionMuted = false;
+let IsCustomerTranscribing = false;
+let IsAgentTranscribing = false;
+let CurrentContactId;
+let CurrentLanguageConfig;
+let CustomerPartialResultsStability;
+let AgentPartialResultsStability;
+
+const LANGUAGE_ATTRIBUTE_KEYS = ["language", "Language", "preferredLanguage", "preferred_language"];
+const LANGUAGE_VALUE_MAP = {
+  spanish: "spanish",
+  es: "spanish",
+  "es-es": "spanish",
+  "es-us": "spanish",
+  french: "french",
+  fr: "french",
+  "fr-fr": "french",
+  "fr-ca": "french",
+};
+
+const LANGUAGE_PRESETS = {
+  spanish: {
+    label: "Spanish",
+    customer: {
+      transcribeLanguage: "es-US",
+      translateLanguage: "es",
+      polly: { languageCode: "es-US", engine: "standard", voiceId: "Lupe" },
+    },
+    agent: {
+      transcribeLanguage: "en-US",
+      translateLanguage: "en",
+      polly: { languageCode: "en-US", engine: "standard", voiceId: "Joanna" },
+    },
+  },
+  french: {
+    label: "French",
+    customer: {
+      transcribeLanguage: "fr-FR",
+      translateLanguage: "fr",
+      polly: { languageCode: "fr-FR", engine: "standard", voiceId: "Lea" },
+    },
+    agent: {
+      transcribeLanguage: "en-US",
+      translateLanguage: "en",
+      polly: { languageCode: "en-US", engine: "standard", voiceId: "Joanna" },
+    },
+  },
+};
+
+const DEFAULT_LANGUAGE_KEY = "spanish";
+const DEFAULT_PARTIAL_RESULT_STABILITY = "medium";
+const ENABLE_CUSTOMER_AUDIO_FEEDBACK = true;
+const ENABLE_AGENT_AUDIO_FEEDBACK = true;
+const STREAM_CUSTOMER_MIC_TO_AGENT = true;
+const STREAM_AGENT_MIC_TO_CUSTOMER = true;
+const STREAM_CUSTOMER_TRANSLATION_TO_CUSTOMER = true;
+const STREAM_AGENT_TRANSLATION_TO_AGENT = false;
+const DEFAULT_MIC_VOLUME = 0.1;
+const DEFAULT_ECHO_CANCELLATION = true;
+const DEFAULT_NOISE_SUPPRESSION = true;
+const DEFAULT_AUTO_GAIN_CONTROL = false;
 
 // AudioContextManager to manage the AudioContext
 let AudioContextMgr = new AudioContextManager();
@@ -92,10 +153,21 @@ window.addEventListener("load", () => {
   initializeApp();
 });
 
+function isEmbeddedConnectApp() {
+  if (window.self !== window.top) {
+    return true;
+  }
+  if (document.referrer) {
+    return document.referrer.includes(".my.connect.aws") || document.referrer.includes("awsapps.com");
+  }
+  return false;
+}
+
 async function initializeApp() {
   try {
     console.info(`${LOGGER_PREFIX} - initializeApp - Initializing app`);
     setRedirectURI();
+    const embeddedConnectApp = isEmbeddedConnectApp();
     // Check if we're returning from Cognito login
     const isRedirect = await handleRedirect();
     if (isRedirect) {
@@ -106,7 +178,7 @@ async function initializeApp() {
     }
 
     // Check authentication and token expiration
-    if (!isAuthenticated()) {
+    if (!isAuthenticated() && !embeddedConnectApp) {
       const tokens = await getValidTokens();
       if (tokens?.accessToken == null || tokens?.idToken == null || tokens?.refreshToken == null) {
         // No valid token available, redirect to login
@@ -118,11 +190,19 @@ async function initializeApp() {
 
     // Show app with valid token
     console.info(`${LOGGER_PREFIX} - initializeApp - Valid token available, showing app`);
-    startTokenRefreshTimer();
+    if (!embeddedConnectApp) {
+      startTokenRefreshTimer();
+    } else if (isAuthenticated()) {
+      startTokenRefreshTimer();
+    }
     showApp();
   } catch (error) {
     console.error(`${LOGGER_PREFIX} - initializeApp - Error initializing app:`, error);
-    window.location.href = getLoginUrl();
+    if (!isEmbeddedConnectApp()) {
+      window.location.href = getLoginUrl();
+    } else {
+      raiseError("Unable to initialize app. Please refresh the page.");
+    }
   }
 }
 
@@ -134,15 +214,14 @@ const onLoad = async () => {
   console.info(`${LOGGER_PREFIX} - index loaded`);
   bindUIElements();
   initEventListeners();
-  CCP_V2V.UI.logoutButton.style.display = "block";
+  if (!isEmbeddedConnectApp()) {
+    CCP_V2V.UI.logoutButton.style.display = "block";
+  }
   getDevices();
   setAudioElementsSinkIds();
-  loadTranscribeLanguageCodes();
   loadTranscribePartialResultsStability();
-  loadTranslateLanguageCodes();
-  loadPollyEngines();
-  loadPollyLanguageCodes();
-  loadCustomerPollyVoiceIds().then(loadAgentPollyVoiceIds);
+  setDetectedLanguageStatus("Waiting for contact...");
+  CurrentLanguageConfig = LANGUAGE_PRESETS[DEFAULT_LANGUAGE_KEY];
   initCCP(onConnectInitialized);
 };
 
@@ -151,17 +230,8 @@ const bindUIElements = () => {
 
   CCP_V2V.UI = {
     logoutButton: document.getElementById("logoutButton"),
-    divInstanceSetup: document.getElementById("divInstanceSetup"),
-    divMain: document.getElementById("divMain"),
-
     ccpContainer: document.querySelector("#ccpContainer"),
-
-    spnCurrentConnectInstanceURL: document.getElementById("spnCurrentConnectInstanceURL"),
-    tbConnectInstanceURL: document.getElementById("tbConnectInstanceURL"),
-    btnSetConnectInstanceURL: document.getElementById("btnSetConnectInstanceURL"),
-    btnStreamFile: document.getElementById("btnStreamFile"),
-    btnStreamMic: document.getElementById("btnStreamMic"),
-    btnRemoveAudioStream: document.getElementById("btnRemoveAudioStream"),
+    detectedLanguageStatus: document.getElementById("detectedLanguageStatus"),
 
     //mic & speaker UI elements
     micSelect: document.getElementById("micSelect"),
@@ -173,68 +243,16 @@ const bindUIElements = () => {
 
     testAudioButton: document.getElementById("testAudioButton"),
     testMicButton: document.getElementById("testMicButton"),
-    speakerSaveButton: document.getElementById("speakerSaveButton"),
-    micSaveButton: document.getElementById("micSaveButton"),
-
-    echoCancellationCheckbox: document.getElementById("echoCancellationCheckbox"),
-    noiseSuppressionCheckbox: document.getElementById("noiseSuppressionCheckbox"),
-    autoGainControlCheckbox: document.getElementById("autoGainControlCheckbox"),
 
     //Transcribe Customer UI Elements
-    customerTranscribeLanguageSelect: document.getElementById("customerTranscribeLanguageSelect"),
-    customerTranscribeLanguageSaveButton: document.getElementById("customerTranscribeLanguageSaveButton"),
-    customerTranscribePartialResultsStabilitySelect: document.getElementById("customerTranscribePartialResultsStabilitySelect"),
-    customerTranscribePartialResultsStabilitySaveButton: document.getElementById("customerTranscribePartialResultsStabilitySaveButton"),
     customerStartTranscriptionButton: document.getElementById("customerStartTranscriptionButton"),
     customerStopTranscriptionButton: document.getElementById("customerStopTranscriptionButton"),
     customerTranscriptionTextOutputDiv: document.getElementById("customerTranscriptionTextOutputDiv"),
-    customerStreamMicCheckbox: document.getElementById("customerStreamMicCheckbox"),
-    customerStreamTranslationCheckbox: document.getElementById("customerStreamTranslationCheckbox"),
-    customerAudioFeedbackEnabledCheckbox: document.getElementById("customerAudioFeedbackEnabledCheckbox"),
-    //Translate Customer UI Elements
-    customerTranslateFromLanguageSelect: document.getElementById("customerTranslateFromLanguageSelect"),
-    customerTranslateToLanguageSelect: document.getElementById("customerTranslateToLanguageSelect"),
-    customerTranslateFromLanguageSaveButton: document.getElementById("customerTranslateFromLanguageSaveButton"),
-    customerTranslateToLanguageSaveButton: document.getElementById("customerTranslateToLanguageSaveButton"),
-    customerTranslatedTextOutputDiv: document.getElementById("customerTranslatedTextOutputDiv"),
-    //Polly Customer UI Elements
-    customerPollyLanguageCodeSelect: document.getElementById("customerPollyLanguageCodeSelect"),
-    customerPollyLanguageCodeSaveButton: document.getElementById("customerPollyLanguageCodeSaveButton"),
-    customerPollyEngineSelect: document.getElementById("customerPollyEngineSelect"),
-    customerPollyEngineSaveButton: document.getElementById("customerPollyEngineSaveButton"),
-    customerPollyVoiceIdSelect: document.getElementById("customerPollyVoiceIdSelect"),
-    customerPollyVoiceIdSaveButton: document.getElementById("customerPollyVoiceIdSaveButton"),
 
     //Transcribe Agent UI Elements
-    agentTranscribeLanguageSelect: document.getElementById("agentTranscribeLanguageSelect"),
-    agentTranscribeLanguageSaveButton: document.getElementById("agentTranscribeLanguageSaveButton"),
-    agentTranscribePartialResultsStabilitySelect: document.getElementById("agentTranscribePartialResultsStabilitySelect"),
-    agentTranscribePartialResultsStabilitySaveButton: document.getElementById("agentTranscribePartialResultsStabilitySaveButton"),
     agentStartTranscriptionButton: document.getElementById("agentStartTranscriptionButton"),
     agentStopTranscriptionButton: document.getElementById("agentStopTranscriptionButton"),
-    agentMuteTranscriptionButton: document.getElementById("agentMuteTranscriptionButton"),
     agentTranscriptionTextOutputDiv: document.getElementById("agentTranscriptionTextOutputDiv"),
-    agentAudioFeedbackEnabledCheckbox: document.getElementById("agentAudioFeedbackEnabledCheckbox"),
-    agentStreamMicCheckbox: document.getElementById("agentStreamMicCheckbox"),
-    agentStreamMicVolume: document.getElementById("agentStreamMicVolume"),
-    agentStreamTranslationCheckbox: document.getElementById("agentStreamTranslationCheckbox"),
-    //Translate Agent UI Elements
-    agentTranslateFromLanguageSelect: document.getElementById("agentTranslateFromLanguageSelect"),
-    agentTranslateToLanguageSelect: document.getElementById("agentTranslateToLanguageSelect"),
-    agentTranslateFromLanguageSaveButton: document.getElementById("agentTranslateFromLanguageSaveButton"),
-    agentTranslateToLanguageSaveButton: document.getElementById("agentTranslateToLanguageSaveButton"),
-    agentTranslateTextInput: document.getElementById("agentTranslateTextInput"),
-    agentTranslateTextButton: document.getElementById("agentTranslateTextButton"),
-    agentTranslatedTextOutputDiv: document.getElementById("agentTranslatedTextOutputDiv"),
-    //Polly Agent UI Elements
-    agentPollyLanguageCodeSelect: document.getElementById("agentPollyLanguageCodeSelect"),
-    agentPollyLanguageCodeSaveButton: document.getElementById("agentPollyLanguageCodeSaveButton"),
-    agentPollyEngineSelect: document.getElementById("agentPollyEngineSelect"),
-    agentPollyEngineSaveButton: document.getElementById("agentPollyEngineSaveButton"),
-    agentPollyVoiceIdSelect: document.getElementById("agentPollyVoiceIdSelect"),
-    agentPollyVoiceIdSaveButton: document.getElementById("agentPollyVoiceIdSaveButton"),
-    agentPollyTextInput: document.getElementById("agentPollyTextInput"),
-    agentSynthesizeSpeechButton: document.getElementById("agentSynthesizeSpeechButton"),
 
     //Transcript UI Elements
     divTranscriptContainer: document.getElementById("divTranscriptContainer"),
@@ -247,11 +265,9 @@ const initEventListeners = () => {
     getDevices();
   });
 
-  CCP_V2V.UI.logoutButton.addEventListener("click", logout);
-
-  CCP_V2V.UI.btnStreamFile.addEventListener("click", streamFile);
-  CCP_V2V.UI.btnStreamMic.addEventListener("click", streamMic);
-  CCP_V2V.UI.btnRemoveAudioStream.addEventListener("click", removeAudioTrack);
+  if (!isEmbeddedConnectApp()) {
+    CCP_V2V.UI.logoutButton.addEventListener("click", logout);
+  }
 
   //mic & speaker ui buttons
   CCP_V2V.UI.testAudioButton.addEventListener("click", testAudioOutput);
@@ -264,141 +280,27 @@ const initEventListeners = () => {
       CCP_V2V.UI.testMicButton.innerText = "Test";
     }
   });
-
-  CCP_V2V.UI.speakerSaveButton.addEventListener("click", () => addUpdateLocalStorageKey("selectedSpeakerId", CCP_V2V.UI.speakerSelect.value));
-  CCP_V2V.UI.micSaveButton.addEventListener("click", () => addUpdateLocalStorageKey("selectedMicId", CCP_V2V.UI.micSelect.value));
-
-  //Transcribe Customer UI buttons
-  CCP_V2V.UI.customerTranscribeLanguageSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("customerTranscribeLanguage", CCP_V2V.UI.customerTranscribeLanguageSelect.value);
-  });
-  CCP_V2V.UI.customerTranscribePartialResultsStabilitySaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("customerTranscribePartialResultsStability", CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.value);
-  });
+  CCP_V2V.UI.speakerSelect.addEventListener("change", () => addUpdateLocalStorageKey("selectedSpeakerId", CCP_V2V.UI.speakerSelect.value));
+  CCP_V2V.UI.micSelect.addEventListener("change", () => addUpdateLocalStorageKey("selectedMicId", CCP_V2V.UI.micSelect.value));
+  CCP_V2V.UI.speakerSelect.addEventListener("change", setAudioElementsSinkIds);
 
   CCP_V2V.UI.customerStartTranscriptionButton.addEventListener("click", customerStartTranscription);
   CCP_V2V.UI.customerStopTranscriptionButton.addEventListener("click", customerStopTranscription);
 
-  CCP_V2V.UI.customerStreamMicCheckbox.addEventListener("change", (event) => {
-    if (event.target.checked) {
-      CCP_V2V.UI.fromCustomerAudioElement.muted = false;
-    } else {
-      CCP_V2V.UI.fromCustomerAudioElement.muted = true;
-    }
-  });
-
-  CCP_V2V.UI.customerAudioFeedbackEnabledCheckbox.addEventListener("change", (event) => {
-    if (event.target.checked) {
-      if (ToCustomerAudioStreamManager != null) ToCustomerAudioStreamManager.enableAudioFeedback(AUDIO_FEEDBACK_FILE_PATH);
-    } else {
-      if (ToCustomerAudioStreamManager != null) ToCustomerAudioStreamManager.disableAudioFeedback();
-    }
-  });
-
-  //Translate Customer UI buttons
-  CCP_V2V.UI.customerTranslateFromLanguageSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("customerTranslateFromLanguage", CCP_V2V.UI.customerTranslateFromLanguageSelect.value);
-  });
-  CCP_V2V.UI.customerTranslateToLanguageSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("customerTranslateToLanguage", CCP_V2V.UI.customerTranslateToLanguageSelect.value);
-  });
-  //Polly Customer UI buttons
-  CCP_V2V.UI.customerPollyLanguageCodeSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("customerPollyLanguageCode", CCP_V2V.UI.customerPollyLanguageCodeSelect.value);
-  });
-  CCP_V2V.UI.customerPollyEngineSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("customerPollyEngine", CCP_V2V.UI.customerPollyEngineSelect.value);
-  });
-  CCP_V2V.UI.customerPollyVoiceIdSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("customerPollyVoiceId", CCP_V2V.UI.customerPollyVoiceIdSelect.value);
-  });
-  CCP_V2V.UI.customerPollyLanguageCodeSelect.addEventListener("change", loadCustomerPollyVoiceIds);
-  CCP_V2V.UI.customerPollyEngineSelect.addEventListener("change", loadCustomerPollyVoiceIds);
-
-  //Transcribe Agent UI buttons
-  CCP_V2V.UI.agentTranscribeLanguageSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentTranscribeLanguage", CCP_V2V.UI.agentTranscribeLanguageSelect.value);
-  });
-  CCP_V2V.UI.agentTranscribePartialResultsStabilitySaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentTranscribePartialResultsStability", CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.value);
-  });
-
   CCP_V2V.UI.agentStartTranscriptionButton.addEventListener("click", agentStartTranscription);
 
   CCP_V2V.UI.agentStopTranscriptionButton.addEventListener("click", agentStopTranscription);
-
-  CCP_V2V.UI.agentMuteTranscriptionButton.addEventListener("click", () => {
-    CCP_V2V.UI.agentMuteTranscriptionButton.textContent = IsAgentTranscriptionMuted ? "Unmute" : "Mute";
-    toggleAgentTranscriptionMute();
-  });
-
-  CCP_V2V.UI.agentAudioFeedbackEnabledCheckbox.addEventListener("change", (event) => {
-    if (event.target.checked) {
-      if (ToAgentAudioStreamManager != null) ToAgentAudioStreamManager.enableAudioFeedback(AUDIO_FEEDBACK_FILE_PATH);
-    } else {
-      if (ToAgentAudioStreamManager != null) ToAgentAudioStreamManager.disableAudioFeedback();
-    }
-  });
-
-  CCP_V2V.UI.agentStreamMicCheckbox.addEventListener("change", (event) => {
-    const selectedMic = CCP_V2V.UI.micSelect.value;
-    const micConstraints = getMicrophoneConstraints(selectedMic);
-    if (event.target.checked) {
-      if (ToCustomerAudioStreamManager != null) ToCustomerAudioStreamManager.startMicrophone(micConstraints);
-    } else {
-      if (ToCustomerAudioStreamManager != null) ToCustomerAudioStreamManager.stopMicrophone();
-    }
-  });
-
-  CCP_V2V.UI.agentStreamMicVolume.addEventListener("input", (event) => {
-    const micVolume = parseFloat(event.target.value);
-    if (ToCustomerAudioStreamManager != null) ToCustomerAudioStreamManager.setMicrophoneVolume(micVolume);
-  });
-
-  //Translate Agent UI buttons
-  CCP_V2V.UI.agentTranslateFromLanguageSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentTranslateFromLanguage", CCP_V2V.UI.agentTranslateFromLanguageSelect.value);
-  });
-  CCP_V2V.UI.agentTranslateToLanguageSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentTranslateToLanguage", CCP_V2V.UI.agentTranslateToLanguageSelect.value);
-  });
-  CCP_V2V.UI.agentTranslateToLanguageSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentTranslateToLanguage", CCP_V2V.UI.agentTranslateToLanguageSelect.value);
-  });
-  CCP_V2V.UI.agentTranslateTextButton.addEventListener("click", handleAgentTranslateText);
-  CCP_V2V.UI.agentTranslateTextInput.addEventListener("keypress", (e) => {
-    if (e.key === "Enter") {
-      handleAgentTranslateText();
-    }
-  });
-  //Polly Agent UI buttons
-  CCP_V2V.UI.agentPollyLanguageCodeSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentPollyLanguageCode", CCP_V2V.UI.agentPollyLanguageCodeSelect.value);
-  });
-  CCP_V2V.UI.agentPollyEngineSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentPollyEngine", CCP_V2V.UI.agentPollyEngineSelect.value);
-  });
-  CCP_V2V.UI.agentPollyVoiceIdSaveButton.addEventListener("click", () => {
-    addUpdateLocalStorageKey("agentPollyVoiceId", CCP_V2V.UI.agentPollyVoiceIdSelect.value);
-  });
-  CCP_V2V.UI.agentPollyLanguageCodeSelect.addEventListener("change", loadAgentPollyVoiceIds);
-  CCP_V2V.UI.agentPollyEngineSelect.addEventListener("change", loadAgentPollyVoiceIds);
-  CCP_V2V.UI.agentSynthesizeSpeechButton.addEventListener("click", handleAgentSynthesizeSpeech);
-  CCP_V2V.UI.agentPollyTextInput.addEventListener("keypress", (e) => {
-    if (e.key === "Enter") {
-      handleAgentSynthesizeSpeech();
-    }
-  });
 };
 
 const initCCP = async (onConnectInitialized) => {
   const { connectCCPURL } = getConnectURLS();
   if (!window.connect.core.initialized) {
     console.info(`${LOGGER_PREFIX} -  Amazon Connect CCP initialization started`);
+    const embeddedConnectApp = isEmbeddedConnectApp();
     window.connect.core.initCCP(CCP_V2V.UI.ccpContainer, {
       ccpUrl: connectCCPURL,
-      loginPopup: true,
-      loginPopupAutoClose: true,
+      loginPopup: !embeddedConnectApp,
+      loginPopupAutoClose: !embeddedConnectApp,
       loginOptions: {
         // optional, if provided opens login in new window
         autoClose: true, // optional, defaults to `false`
@@ -409,7 +311,7 @@ const initCCP = async (onConnectInitialized) => {
       },
       region: CONNECT_CONFIG.connectInstanceRegion,
       softphone: {
-        allowFramedSoftphone: false, //we don't want the default softphone
+        allowFramedSoftphone: true, //use framed softphone when embedded
         allowFramedVideoCall: true, //allow the agent to add video to the call
         disableRingtone: false,
       },
@@ -484,6 +386,9 @@ function onContactConnecting(contact) {
 function onContactConnected(contact) {
   console.info(`${LOGGER_PREFIX} - contact connected`, contact);
 
+  CurrentContactId = contact.getContactId();
+  applyLanguageConfigFromContact(contact);
+
   CCP_V2V.UI.customerStartTranscriptionButton.disabled = false;
   CCP_V2V.UI.agentStartTranscriptionButton.disabled = false;
 }
@@ -491,6 +396,8 @@ function onContactConnected(contact) {
 function onContactEnded(contact) {
   console.info(`${LOGGER_PREFIX} - contact has ended`, contact);
   CurrentAgentConnectionId = null;
+  CurrentContactId = null;
+  setDetectedLanguageStatus("Waiting for contact...");
   if (ToCustomerAudioStreamManager != null) {
     ToCustomerAudioStreamManager.dispose();
     ToCustomerAudioStreamManager = null;
@@ -705,53 +612,47 @@ async function getDevices() {
   }
 }
 
-async function loadTranscribeLanguageCodes() {
-  const transcribeStreamingLanguages = listStreamingLanguages();
-  transcribeStreamingLanguages.forEach((language) => {
-    const option = document.createElement("option");
-    option.value = language;
-    option.textContent = language;
-    CCP_V2V.UI.customerTranscribeLanguageSelect.appendChild(option);
-    CCP_V2V.UI.agentTranscribeLanguageSelect.appendChild(option.cloneNode(true));
-  });
-  //set en-US as default
-  CCP_V2V.UI.customerTranscribeLanguageSelect.value = "en-US";
-  CCP_V2V.UI.agentTranscribeLanguageSelect.value = "en-US";
+ 
 
-  //pre-select saved transcribeLanguage
-  const savedCustomerTranscribeLanguage = getLocalStorageValueByKey("customerTranscribeLanguage");
-  if (savedCustomerTranscribeLanguage) {
-    CCP_V2V.UI.customerTranscribeLanguageSelect.value = savedCustomerTranscribeLanguage;
-  }
+function loadTranscribePartialResultsStability() {
+  const defaultStability = TRANSCRIBE_PARTIAL_RESULTS_STABILITY.includes(DEFAULT_PARTIAL_RESULT_STABILITY)
+    ? DEFAULT_PARTIAL_RESULT_STABILITY
+    : TRANSCRIBE_PARTIAL_RESULTS_STABILITY[0] ?? "none";
+  CustomerPartialResultsStability = defaultStability;
+  AgentPartialResultsStability = defaultStability;
+}
 
-  const savedAgentTranscribeLanguage = getLocalStorageValueByKey("agentTranscribeLanguage");
-  if (savedAgentTranscribeLanguage) {
-    CCP_V2V.UI.agentTranscribeLanguageSelect.value = savedAgentTranscribeLanguage;
+function setDetectedLanguageStatus(text) {
+  if (CCP_V2V.UI.detectedLanguageStatus) {
+    CCP_V2V.UI.detectedLanguageStatus.textContent = text;
   }
 }
 
-function loadTranscribePartialResultsStability() {
-  TRANSCRIBE_PARTIAL_RESULTS_STABILITY.forEach((stability) => {
-    const option = document.createElement("option");
-    option.value = stability;
-    option.textContent = stability;
-    CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.appendChild(option);
-    CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.appendChild(option.cloneNode(true));
-  });
-  //set none as default
-  CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.value = "none";
-  CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.value = "none";
-
-  //pre-select saved transcribePartialResultStability
-  const savedCustomerTranscribePartialResultsStability = getLocalStorageValueByKey("customerTranscribePartialResultsStability");
-  if (savedCustomerTranscribePartialResultsStability) {
-    CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.value = savedCustomerTranscribePartialResultsStability;
+function applyLanguageConfigFromContact(contact) {
+  const languageKey = resolveLanguageKeyFromContact(contact);
+  const resolvedKey = LANGUAGE_PRESETS[languageKey] ? languageKey : DEFAULT_LANGUAGE_KEY;
+  CurrentLanguageConfig = LANGUAGE_PRESETS[resolvedKey];
+  if (resolvedKey !== languageKey) {
+    setDetectedLanguageStatus(`${CurrentLanguageConfig.label} (defaulted)`);
+  } else {
+    setDetectedLanguageStatus(`${CurrentLanguageConfig.label} (auto-detected)`);
   }
+}
 
-  const savedAgentTranscribePartialResultsStability = getLocalStorageValueByKey("agentTranscribePartialResultsStability");
-  if (savedAgentTranscribePartialResultsStability) {
-    CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.value = savedAgentTranscribePartialResultsStability;
+function resolveLanguageKeyFromContact(contact) {
+  if (!contact?.getAttributes) {
+    return DEFAULT_LANGUAGE_KEY;
   }
+  const attributes = contact.getAttributes() ?? {};
+  for (const key of LANGUAGE_ATTRIBUTE_KEYS) {
+    const attribute = attributes[key];
+    const value = attribute?.value ?? attribute?.Value ?? attribute?.valueString ?? attribute?.ValueString;
+    if (value) {
+      const normalizedValue = String(value).trim().toLowerCase();
+      return LANGUAGE_VALUE_MAP[normalizedValue] ?? normalizedValue;
+    }
+  }
+  return DEFAULT_LANGUAGE_KEY;
 }
 
 //Creates Customer Speaker Stream used as input for Amazon Transcribe when transcribing customer's voice
@@ -763,23 +664,28 @@ async function captureFromCustomerAudioStream() {
     throw new Error("No audio stream found from customer, please check you browser sound settings");
   }
 
-  const amazonTranscribeFromCustomerAudioStream = new MicrophoneStream();
+  const audioContext = await getAudioContext();
+  const amazonTranscribeFromCustomerAudioStream = new MicrophoneStream({ audioContext });
   amazonTranscribeFromCustomerAudioStream.setStream(audioStream);
   return amazonTranscribeFromCustomerAudioStream;
 }
 
 async function customerStartTranscription() {
   try {
-    if (CCP_V2V.UI.customerStreamMicCheckbox.checked === true) {
-      //we want agent to hear the customer's original voice, so we reduce the fromCustomerAudioElement volume
+    IsCustomerTranscribing = true;
+    if (!CurrentLanguageConfig) {
+      CurrentLanguageConfig = LANGUAGE_PRESETS[DEFAULT_LANGUAGE_KEY];
+      setDetectedLanguageStatus(`${CurrentLanguageConfig.label} (default)`);
+    }
+    if (STREAM_CUSTOMER_MIC_TO_AGENT) {
       CCP_V2V.UI.fromCustomerAudioElement.volume = 0.3;
+      CCP_V2V.UI.fromCustomerAudioElement.muted = false;
     } else {
-      //we don't want agent to hear the customer's original voice, so we mute the fromCustomerAudioElement
       CCP_V2V.UI.fromCustomerAudioElement.muted = true;
     }
 
     //Play the audio feedback to customer
-    if (CCP_V2V.UI.customerAudioFeedbackEnabledCheckbox.checked === true) {
+    if (ENABLE_CUSTOMER_AUDIO_FEEDBACK) {
       ToCustomerAudioStreamManager.enableAudioFeedback(AUDIO_FEEDBACK_FILE_PATH);
     }
 
@@ -789,29 +695,37 @@ async function customerStartTranscription() {
 
     //getting the remote audio stream from the current RTC session into AmazonTranscribeFromCustomerAudioStream variable
     AmazonTranscribeFromCustomerAudioStream = await captureFromCustomerAudioStream();
-    const customerStreamSampleRate = AudioContextMgr.getActualSampleRate();
-    console.info(`${LOGGER_PREFIX} - customerStartTranscription - AmazonTranscribeFromCustomerAudioStream Sample Rate: ${customerStreamSampleRate}`);
+    const customerStreamSampleRate = (await getAudioContext()).sampleRate;
+    const customerTargetSampleRate = getAutoSelectedSampleRate(customerStreamSampleRate);
+    console.info(
+      `${LOGGER_PREFIX} - customerStartTranscription - AmazonTranscribeFromCustomerAudioStream Sample Rate: ${customerStreamSampleRate}, target: ${customerTargetSampleRate}`
+    );
 
     startCustomerStreamTranscription(
       AmazonTranscribeFromCustomerAudioStream,
       customerStreamSampleRate,
-      CCP_V2V.UI.customerTranscribeLanguageSelect.value,
-      CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.value,
+      CurrentLanguageConfig.customer.transcribeLanguage,
+      CustomerPartialResultsStability,
       handleCustomerTranscript,
-      handleCustomerPartialTranscript
+      handleCustomerPartialTranscript,
+      {
+        shouldStop: () => !IsCustomerTranscribing,
+        onRetry: (details) => handleTranscribeRetry("customer", details),
+        targetSampleRate: customerTargetSampleRate,
+      }
     );
 
-    CCP_V2V.UI.customerTranscribeLanguageSelect.disabled = true;
-    CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.disabled = true;
     CCP_V2V.UI.customerStartTranscriptionButton.disabled = true;
     CCP_V2V.UI.customerStopTranscriptionButton.disabled = false;
   } catch (error) {
     console.error(`${LOGGER_PREFIX} - customerStartTranscription - Error starting customer transcription:`, error);
     raiseError(`Error starting customer transcription: ${error}`);
+    IsCustomerTranscribing = false;
   }
 }
 
 async function customerStopTranscription() {
+  IsCustomerTranscribing = false;
   if (AmazonTranscribeFromCustomerAudioStream) {
     //replace the stream with a silent stream
     const audioContext = await getAudioContext();
@@ -825,18 +739,21 @@ async function customerStopTranscription() {
   //un-mute the audio element
   CCP_V2V.UI.fromCustomerAudioElement.muted = false;
 
-  CCP_V2V.UI.customerTranscribeLanguageSelect.disabled = false;
-  CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.disabled = false;
   CCP_V2V.UI.customerStartTranscriptionButton.disabled = false;
   CCP_V2V.UI.customerStopTranscriptionButton.disabled = true;
 }
 
 async function agentStartTranscription() {
   try {
+    IsAgentTranscribing = true;
+    if (!CurrentLanguageConfig) {
+      CurrentLanguageConfig = LANGUAGE_PRESETS[DEFAULT_LANGUAGE_KEY];
+      setDetectedLanguageStatus(`${CurrentLanguageConfig.label} (default)`);
+    }
     const selectedMic = CCP_V2V.UI.micSelect.value;
     const micConstraints = getMicrophoneConstraints(selectedMic);
 
-    if (CCP_V2V.UI.agentAudioFeedbackEnabledCheckbox.checked === true) {
+    if (ENABLE_AGENT_AUDIO_FEEDBACK) {
       ToAgentAudioStreamManager.enableAudioFeedback(AUDIO_FEEDBACK_FILE_PATH);
     }
 
@@ -844,28 +761,34 @@ async function agentStartTranscription() {
     const toCustomerAudioTrack = ToCustomerAudioStreamManager.getAudioTrack();
     RTCSessionTrackManager.replaceTrack(toCustomerAudioTrack, TrackType.POLLY);
 
-    if (CCP_V2V.UI.agentStreamMicCheckbox.checked === true) {
+    if (STREAM_AGENT_MIC_TO_CUSTOMER) {
       await ToCustomerAudioStreamManager.startMicrophone(micConstraints);
-      const micVolume = parseFloat(CCP_V2V.UI.agentStreamMicVolume.value);
-      ToCustomerAudioStreamManager.setMicrophoneVolume(micVolume);
+      ToCustomerAudioStreamManager.setMicrophoneVolume(DEFAULT_MIC_VOLUME);
     }
 
     //getting the local Mic stream into AmazonTranscribeMicStream variable
-    AmazonTranscribeToCustomerAudioStream = await createMicrophoneStream(micConstraints);
-    const agentStreamSampleRate = AudioContextMgr.getActualSampleRate();
-    console.info(`${LOGGER_PREFIX} - agentStartTranscription - AmazonTranscribeToCustomerAudioStream Sample Rate: ${agentStreamSampleRate}`);
+    const audioContext = await getAudioContext();
+    AmazonTranscribeToCustomerAudioStream = await createMicrophoneStream(micConstraints, audioContext);
+    const agentStreamSampleRate = audioContext.sampleRate;
+    const agentTargetSampleRate = getAutoSelectedSampleRate(agentStreamSampleRate);
+    console.info(
+      `${LOGGER_PREFIX} - agentStartTranscription - AmazonTranscribeToCustomerAudioStream Sample Rate: ${agentStreamSampleRate}, target: ${agentTargetSampleRate}`
+    );
 
     startAgentStreamTranscription(
       AmazonTranscribeToCustomerAudioStream,
       agentStreamSampleRate,
-      CCP_V2V.UI.agentTranscribeLanguageSelect.value,
-      CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.value,
+      CurrentLanguageConfig.agent.transcribeLanguage,
+      AgentPartialResultsStability,
       handleAgentTranscript,
-      handleAgentPartialTranscript
+      handleAgentPartialTranscript,
+      {
+        shouldStop: () => !IsAgentTranscribing,
+        onRetry: (details) => handleTranscribeRetry("agent", details),
+        targetSampleRate: agentTargetSampleRate,
+      }
     );
 
-    CCP_V2V.UI.agentTranscribeLanguageSelect.disabled = true;
-    CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.disabled = true;
     CCP_V2V.UI.agentStartTranscriptionButton.disabled = true;
     CCP_V2V.UI.agentStopTranscriptionButton.disabled = false;
 
@@ -873,10 +796,12 @@ async function agentStartTranscription() {
   } catch (error) {
     console.error(`${LOGGER_PREFIX} - agentStartTranscription - Error starting agent transcription:`, error);
     raiseError(`Error starting agent transcription: ${error}`);
+    IsAgentTranscribing = false;
   }
 }
 
 async function agentStopTranscription() {
+  IsAgentTranscribing = false;
   if (AmazonTranscribeToCustomerAudioStream) {
     //replace the stream with a silent stream
     const audioContext = await getAudioContext();
@@ -887,77 +812,13 @@ async function agentStopTranscription() {
     AmazonTranscribeToCustomerAudioStream = undefined;
   }
 
-  CCP_V2V.UI.agentTranscribeLanguageSelect.disabled = false;
-  CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.disabled = false;
   CCP_V2V.UI.agentStartTranscriptionButton.disabled = false;
   CCP_V2V.UI.agentStopTranscriptionButton.disabled = true;
 
   enableMicrophoneAndSpeakerSelection();
 }
 
-function toggleAgentTranscriptionMute() {
-  if (AmazonTranscribeToCustomerAudioStream) {
-    const audioTrack = AmazonTranscribeToCustomerAudioStream.stream.getAudioTracks()[0];
-    if (audioTrack) {
-      //Disable the track in AmazonTranscribeToCustomerAudioStream
-      audioTrack.enabled = !audioTrack.enabled;
-      IsAgentTranscriptionMuted = !audioTrack.enabled;
-      //Mute the Mic so it is not streamed to Customer
-      const selectedMic = CCP_V2V.UI.micSelect.value;
-      const micConstraints = getMicrophoneConstraints(selectedMic);
-      IsAgentTranscriptionMuted ? ToCustomerAudioStreamManager.stopMicrophone() : ToCustomerAudioStreamManager.startMicrophone(micConstraints);
-      CCP_V2V.UI.agentMuteTranscriptionButton.textContent = IsAgentTranscriptionMuted ? "Unmute" : "Mute";
-    }
-  }
-}
-
-async function loadTranslateLanguageCodes() {
-  const translateLanguages = await listTranslateLanguages().catch((error) => {
-    console.error(`${LOGGER_PREFIX} - loadTranslateLanguageCodes - Error listing languages:`, error);
-    raiseError(`Error listing languages: ${error}`);
-    return [];
-  });
-
-  translateLanguages.forEach((language) => {
-    const option = document.createElement("option");
-    option.value = language.LanguageCode;
-    option.textContent = language.LanguageName;
-
-    CCP_V2V.UI.customerTranslateFromLanguageSelect.appendChild(option);
-    CCP_V2V.UI.customerTranslateToLanguageSelect.appendChild(option.cloneNode(true));
-
-    CCP_V2V.UI.agentTranslateFromLanguageSelect.appendChild(option.cloneNode(true));
-    CCP_V2V.UI.agentTranslateToLanguageSelect.appendChild(option.cloneNode(true));
-  });
-  //set en as default
-  CCP_V2V.UI.customerTranslateFromLanguageSelect.value = "en";
-  CCP_V2V.UI.customerTranslateToLanguageSelect.value = "es";
-
-  CCP_V2V.UI.agentTranslateFromLanguageSelect.value = "en";
-  CCP_V2V.UI.agentTranslateToLanguageSelect.value = "es";
-
-  //pre-select saved translateFromLanguage
-  const savedCustomerTranslateFromLanguage = getLocalStorageValueByKey("customerTranslateFromLanguage");
-  if (savedCustomerTranslateFromLanguage) {
-    CCP_V2V.UI.customerTranslateFromLanguageSelect.value = savedCustomerTranslateFromLanguage;
-  }
-
-  const savedAgentTranslateFromLanguage = getLocalStorageValueByKey("agentTranslateFromLanguage");
-  if (savedAgentTranslateFromLanguage) {
-    CCP_V2V.UI.agentTranslateFromLanguageSelect.value = savedAgentTranslateFromLanguage;
-  }
-
-  //pre-select saved translateToLanguage
-  const savedCustomerTranslateToLanguage = getLocalStorageValueByKey("customerTranslateToLanguage");
-  if (savedCustomerTranslateToLanguage) {
-    CCP_V2V.UI.customerTranslateToLanguageSelect.value = savedCustomerTranslateToLanguage;
-  }
-
-  const savedAgentTranslateToLanguage = getLocalStorageValueByKey("agentTranslateToLanguage");
-  if (savedAgentTranslateToLanguage) {
-    CCP_V2V.UI.agentTranslateToLanguageSelect.value = savedAgentTranslateToLanguage;
-  }
-}
+ 
 
 async function handleCustomerPartialTranscript(inputText) {
   if (isStringUndefinedNullEmpty(inputText)) return;
@@ -977,8 +838,8 @@ async function handleCustomerTranscript(inputText) {
     CCP_V2V.UI.customerTranscriptionTextOutputDiv.textContent = inputText;
   }, 100);
 
-  const fromLanguage = CCP_V2V.UI.customerTranslateFromLanguageSelect.value;
-  const toLanguage = CCP_V2V.UI.customerTranslateToLanguageSelect.value;
+  const fromLanguage = CurrentLanguageConfig.customer.translateLanguage;
+  const toLanguage = CurrentLanguageConfig.agent.translateLanguage;
   const translatedText = await translateText(fromLanguage, toLanguage, inputText).catch((error) => {
     console.error(`${LOGGER_PREFIX} - handleCustomerTranscript - Error translating text:`, error);
     raiseError(`Error translating text: ${error}`);
@@ -987,11 +848,10 @@ async function handleCustomerTranscript(inputText) {
 
   if (!isStringUndefinedNullEmpty(translatedText)) {
     synthesizeCustomerVoice(translatedText);
-    //update CCP_V2V.UI.customerTranslatedTextOutputDiv.textContent after 100ms
     setTimeout(() => {
-      CCP_V2V.UI.customerTranslatedTextOutputDiv.textContent = translatedText;
       addTranscriptCard(inputText, translatedText, "toAgent");
     }, 100);
+
   }
 }
 
@@ -1004,26 +864,6 @@ async function handleAgentPartialTranscript(inputText) {
   }, 100);
 }
 
-async function handleAgentTranslateText() {
-  const inputText = CCP_V2V.UI.agentTranslateTextInput.value;
-  if (isStringUndefinedNullEmpty(inputText)) return;
-
-  const fromLanguage = CCP_V2V.UI.agentTranslateFromLanguageSelect.value;
-  const toLanguage = CCP_V2V.UI.agentTranslateToLanguageSelect.value;
-  const translatedText = await translateText(fromLanguage, toLanguage, inputText);
-
-  if (!isStringUndefinedNullEmpty(translatedText)) {
-    synthesizeAgentVoice(translatedText);
-    //update CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent after 100ms
-    setTimeout(() => {
-      CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent = translatedText;
-      addTranscriptCard(inputText, translatedText, "fromAgent");
-    }, 100);
-  }
-  CCP_V2V.UI.agentTranslateTextInput.value = "";
-  CCP_V2V.UI.agentTranslateTextInput.focus();
-}
-
 async function handleAgentTranscript(inputText) {
   if (isStringUndefinedNullEmpty(inputText)) return;
 
@@ -1033,127 +873,26 @@ async function handleAgentTranscript(inputText) {
     CCP_V2V.UI.agentTranscriptionTextOutputDiv.textContent = inputText;
   }, 100);
 
-  const fromLanguage = CCP_V2V.UI.agentTranslateFromLanguageSelect.value;
-  const toLanguage = CCP_V2V.UI.agentTranslateToLanguageSelect.value;
+  const fromLanguage = CurrentLanguageConfig.agent.translateLanguage;
+  const toLanguage = CurrentLanguageConfig.customer.translateLanguage;
   const translatedText = await translateText(fromLanguage, toLanguage, inputText);
 
   if (!isStringUndefinedNullEmpty(translatedText)) {
     synthesizeAgentVoice(translatedText);
-    //update CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent after 100ms
     setTimeout(() => {
-      CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent = translatedText;
       addTranscriptCard(inputText, translatedText, "fromAgent");
     }, 100);
+
   }
 }
 
-function loadPollyLanguageCodes() {
-  const pollyLanguageCodes = listPollyLanguages();
-  pollyLanguageCodes.forEach((languageCode) => {
-    const option = document.createElement("option");
-    option.value = languageCode;
-    option.textContent = languageCode;
-    CCP_V2V.UI.customerPollyLanguageCodeSelect.appendChild(option);
-    CCP_V2V.UI.agentPollyLanguageCodeSelect.appendChild(option.cloneNode(true));
-  });
-  //set un - US as default
-  CCP_V2V.UI.customerPollyLanguageCodeSelect.value = "en-US";
-  CCP_V2V.UI.agentPollyLanguageCodeSelect.value = "en-US";
-
-  //pre-select saved pollyLanguageCode
-  const savedCUstomerPollyLanguageCode = getLocalStorageValueByKey("customerPollyLanguageCode");
-  if (savedCUstomerPollyLanguageCode) {
-    CCP_V2V.UI.customerPollyLanguageCodeSelect.value = savedCUstomerPollyLanguageCode;
-  }
-
-  const savedAgentPollyLanguageCode = getLocalStorageValueByKey("agentPollyLanguageCode");
-  if (savedAgentPollyLanguageCode) {
-    CCP_V2V.UI.agentPollyLanguageCodeSelect.value = savedAgentPollyLanguageCode;
-  }
-}
-
-function loadPollyEngines() {
-  const pollyEngines = listPollyEngines();
-  pollyEngines.forEach((engine) => {
-    const option = document.createElement("option");
-    option.value = engine;
-    option.textContent = engine;
-    CCP_V2V.UI.customerPollyEngineSelect.appendChild(option);
-    CCP_V2V.UI.agentPollyEngineSelect.appendChild(option.cloneNode(true));
-  });
-
-  //pre-select saved pollyEngine
-  const savedCustomerPollyEngine = getLocalStorageValueByKey("customerPollyEngine");
-  if (savedCustomerPollyEngine) {
-    CCP_V2V.UI.customerPollyEngineSelect.value = savedCustomerPollyEngine;
-  }
-
-  const savedAgentPollyEngine = getLocalStorageValueByKey("agentPollyEngine");
-  if (savedAgentPollyEngine) {
-    CCP_V2V.UI.agentPollyEngineSelect.value = savedAgentPollyEngine;
-  }
-}
-
-async function loadCustomerPollyVoiceIds() {
-  const customerSelectedLanguageCode = CCP_V2V.UI.customerPollyLanguageCodeSelect.value;
-  const customerSelectedPollyEngine = CCP_V2V.UI.customerPollyEngineSelect.value;
-
-  const pollyVoices = await describeVoices(customerSelectedLanguageCode, customerSelectedPollyEngine).catch((error) => {
-    console.error(`${LOGGER_PREFIX} - loadCustomerPollyVoiceIds - Error describing voices:`, error);
-    raiseError(`Error describing voices: ${error}`);
-    return [];
-  });
-
-  //clear pollyVoiceIdSelect
-  CCP_V2V.UI.customerPollyVoiceIdSelect.innerHTML = "";
-
-  pollyVoices.forEach((voice) => {
-    const option = document.createElement("option");
-    option.value = voice.Id;
-    option.textContent = voice.Name;
-    CCP_V2V.UI.customerPollyVoiceIdSelect.appendChild(option);
-  });
-  //pre-select saved pollyVoiceId
-  const savedCustomerPollyVoiceId = getLocalStorageValueByKey("customerPollyVoiceId");
-  if (savedCustomerPollyVoiceId) {
-    CCP_V2V.UI.customerPollyVoiceIdSelect.value = savedCustomerPollyVoiceId;
-  }
-}
-
-async function loadAgentPollyVoiceIds() {
-  const agentSelectedLanguageCode = CCP_V2V.UI.agentPollyLanguageCodeSelect.value;
-  const agentSelectedPollyEngine = CCP_V2V.UI.agentPollyEngineSelect.value;
-
-  const pollyVoices = await describeVoices(agentSelectedLanguageCode, agentSelectedPollyEngine).catch((error) => {
-    console.error(`${LOGGER_PREFIX} - loadAgentPollyVoiceIds - Error describing voices:`, error);
-    raiseError(`Error describing voices: ${error}`);
-    return [];
-  });
-
-  //clear pollyVoiceIdSelect
-  CCP_V2V.UI.agentPollyVoiceIdSelect.innerHTML = "";
-
-  pollyVoices.forEach((voice) => {
-    const option = document.createElement("option");
-    option.value = voice.Id;
-    option.textContent = voice.Name;
-    CCP_V2V.UI.agentPollyVoiceIdSelect.appendChild(option);
-  });
-  //pre-select saved pollyVoiceId
-  const savedAgentPollyVoiceId = getLocalStorageValueByKey("agentPollyVoiceId");
-  if (savedAgentPollyVoiceId) {
-    CCP_V2V.UI.agentPollyVoiceIdSelect.value = savedAgentPollyVoiceId;
-  }
-}
 
 async function synthesizeCustomerVoice(inputText) {
   if (isStringUndefinedNullEmpty(inputText)) return;
 
-  const selectedLanguageCode = CCP_V2V.UI.customerPollyLanguageCodeSelect.value;
-  const selectedPollyEngine = CCP_V2V.UI.customerPollyEngineSelect.value;
-  const selectedVoiceId = CCP_V2V.UI.customerPollyVoiceIdSelect.value;
+  const { languageCode, engine, voiceId } = CurrentLanguageConfig.agent.polly;
 
-  const synthetizedSpeech = await synthesizeSpeech(selectedLanguageCode, selectedPollyEngine, selectedVoiceId, inputText).catch((error) => {
+  const synthetizedSpeech = await synthesizeSpeech(languageCode, engine, voiceId, inputText).catch((error) => {
     console.error(`${LOGGER_PREFIX} - synthesizeCustomerVoice - Error synthesizing speech:`, error);
     raiseError(`Error synthesizing speech: ${error}`);
     return null;
@@ -1167,7 +906,7 @@ async function synthesizeCustomerVoice(inputText) {
   }
 
   //Play Customer Speech to Customer
-  if (CCP_V2V.UI.customerStreamTranslationCheckbox.checked === true) {
+  if (STREAM_CUSTOMER_TRANSLATION_TO_CUSTOMER) {
     const audioContentArrayBufferSecondary = base64ToArrayBuffer(synthetizedSpeech);
     if (ToCustomerAudioStreamManager != null) {
       ToCustomerAudioStreamManager.playAudioBuffer(audioContentArrayBufferSecondary, CUSTOMER_TRANSLATION_TO_CUSTOMER_VOLUME);
@@ -1178,11 +917,9 @@ async function synthesizeCustomerVoice(inputText) {
 async function synthesizeAgentVoice(inputText) {
   if (isStringUndefinedNullEmpty(inputText)) return;
 
-  const selectedLanguageCode = CCP_V2V.UI.agentPollyLanguageCodeSelect.value;
-  const selectedPollyEngine = CCP_V2V.UI.agentPollyEngineSelect.value;
-  const selectedVoiceId = CCP_V2V.UI.agentPollyVoiceIdSelect.value;
+  const { languageCode, engine, voiceId } = CurrentLanguageConfig.customer.polly;
 
-  const synthetizedSpeech = await synthesizeSpeech(selectedLanguageCode, selectedPollyEngine, selectedVoiceId, inputText).catch((error) => {
+  const synthetizedSpeech = await synthesizeSpeech(languageCode, engine, voiceId, inputText).catch((error) => {
     console.error(`${LOGGER_PREFIX} - synthesizeAgentVoice - Error synthesizing speech:`, error);
     raiseError(`Error synthesizing speech: ${error}`);
     return null;
@@ -1196,7 +933,7 @@ async function synthesizeAgentVoice(inputText) {
   }
 
   //Play Agent Speech to Agent
-  if (CCP_V2V.UI.agentStreamTranslationCheckbox.checked === true) {
+  if (STREAM_AGENT_TRANSLATION_TO_AGENT) {
     const audioContentArrayBufferSecondary = base64ToArrayBuffer(synthetizedSpeech);
     if (ToAgentAudioStreamManager != null) {
       ToAgentAudioStreamManager.playAudioBuffer(audioContentArrayBufferSecondary, AGENT_TRANSLATION_TO_AGENT_VOLUME);
@@ -1204,27 +941,12 @@ async function synthesizeAgentVoice(inputText) {
   }
 }
 
-async function handleAgentSynthesizeSpeech() {
-  const inputText = CCP_V2V.UI.agentPollyTextInput.value;
-  if (isStringUndefinedNullEmpty(inputText)) return;
-
-  synthesizeAgentVoice(inputText);
-  CCP_V2V.UI.agentPollyTextInput.value = "";
-  CCP_V2V.UI.agentPollyTextInput.focus();
-  addTranscriptCard(inputText, inputText, "fromAgent");
-}
-
 function cleanUpUI() {
   CCP_V2V.UI.customerTranscriptionTextOutputDiv.textContent = "";
   setBackgroundColour(CCP_V2V.UI.customerTranscriptionTextOutputDiv);
-  CCP_V2V.UI.customerTranslatedTextOutputDiv.textContent = "";
 
   CCP_V2V.UI.agentTranscriptionTextOutputDiv.textContent = "";
   setBackgroundColour(CCP_V2V.UI.agentTranscriptionTextOutputDiv);
-  CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent = "";
-
-  CCP_V2V.UI.agentTranslateTextInput.value = "";
-  CCP_V2V.UI.agentPollyTextInput.value = "";
 
   CCP_V2V.UI.customerStartTranscriptionButton.disabled = true;
   CCP_V2V.UI.agentStartTranscriptionButton.disabled = true;
@@ -1275,6 +997,48 @@ function addTranscriptCard(originalTranscript, translatedTranscript, type) {
   CCP_V2V.UI.divTranscriptContainer.scrollTop = CCP_V2V.UI.divTranscriptContainer.scrollHeight;
 }
 
+function getAutoSelectedSampleRate(inputSampleRate) {
+  try {
+    const navigatorRef = typeof navigator !== "undefined" ? navigator : null;
+    const connection = navigatorRef?.connection || navigatorRef?.mozConnection || navigatorRef?.webkitConnection;
+    if (!connection) {
+      return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+    }
+
+    const { effectiveType, downlink, rtt, saveData } = connection;
+    if (saveData === true) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "slow-2g" || effectiveType === "2g") {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "3g" || (typeof downlink === "number" && downlink < 1.5) || (typeof rtt === "number" && rtt > 300)) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.medium);
+    }
+
+    return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.high);
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - getAutoSelectedSampleRate - Falling back to default sample rate`, error);
+    return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+  }
+}
+
+function handleTranscribeRetry(target, details) {
+  const message = `Reconnecting transcription (attempt ${details.attempt})...`;
+  if (target === "customer") {
+    setBackgroundColour(CCP_V2V.UI.customerTranscriptionTextOutputDiv, "bg-pale-yellow");
+    CCP_V2V.UI.customerTranscriptionTextOutputDiv.textContent = message;
+    return;
+  }
+
+  if (target === "agent") {
+    setBackgroundColour(CCP_V2V.UI.agentTranscriptionTextOutputDiv, "bg-pale-yellow");
+    CCP_V2V.UI.agentTranscriptionTextOutputDiv.textContent = message;
+  }
+}
+
 function clearTranscriptCards() {
   const container = CCP_V2V.UI.divTranscriptContainer;
 
@@ -1286,9 +1050,9 @@ function getMicrophoneConstraints(deviceId) {
   let microphoneConstraints = {
     audio: {
       deviceId: deviceId,
-      echoCancellation: CCP_V2V.UI.echoCancellationCheckbox.checked === true,
-      noiseSuppression: CCP_V2V.UI.noiseSuppressionCheckbox.checked === true,
-      autoGainControl: CCP_V2V.UI.autoGainControlCheckbox.checked === true,
+      echoCancellation: DEFAULT_ECHO_CANCELLATION,
+      noiseSuppression: DEFAULT_NOISE_SUPPRESSION,
+      autoGainControl: DEFAULT_AUTO_GAIN_CONTROL,
     },
   };
 
@@ -1301,14 +1065,8 @@ function enableMicrophoneAndSpeakerSelection() {
   CCP_V2V.UI.speakerSelect.disabled = false;
 
   CCP_V2V.UI.testAudioButton.disabled = false;
-  CCP_V2V.UI.speakerSaveButton.disabled = false;
 
   CCP_V2V.UI.testMicButton.disabled = false;
-  CCP_V2V.UI.micSaveButton.disabled = false;
-
-  CCP_V2V.UI.echoCancellationCheckbox.disabled = false;
-  CCP_V2V.UI.noiseSuppressionCheckbox.disabled = false;
-  CCP_V2V.UI.autoGainControlCheckbox.disabled = false;
 }
 
 function disableMicrophoneAndSpeakerSelection() {
@@ -1316,12 +1074,6 @@ function disableMicrophoneAndSpeakerSelection() {
   CCP_V2V.UI.speakerSelect.disabled = true;
 
   CCP_V2V.UI.testAudioButton.disabled = true;
-  CCP_V2V.UI.speakerSaveButton.disabled = true;
 
   CCP_V2V.UI.testMicButton.disabled = true;
-  CCP_V2V.UI.micSaveButton.disabled = true;
-
-  CCP_V2V.UI.echoCancellationCheckbox.disabled = true;
-  CCP_V2V.UI.noiseSuppressionCheckbox.disabled = true;
-  CCP_V2V.UI.autoGainControlCheckbox.disabled = true;
 }
