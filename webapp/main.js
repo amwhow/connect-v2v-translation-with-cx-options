@@ -11,6 +11,7 @@ import {
   AUDIO_FEEDBACK_FILE_PATH,
   CUSTOMER_TRANSLATION_TO_CUSTOMER_VOLUME,
   LOGGER_PREFIX,
+  TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS,
   TRANSCRIBE_PARTIAL_RESULTS_STABILITY,
   TRANSCRIBE_TARGET_SAMPLE_RATE,
 } from "./constants";
@@ -795,7 +796,7 @@ async function customerStartTranscription() {
     //getting the remote audio stream from the current RTC session into AmazonTranscribeFromCustomerAudioStream variable
     AmazonTranscribeFromCustomerAudioStream = await captureFromCustomerAudioStream();
     const customerStreamSampleRate = (await getAudioContext()).sampleRate;
-    const customerTargetSampleRate = Math.min(customerStreamSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+    const customerTargetSampleRate = getAutoSelectedSampleRate(customerStreamSampleRate);
     console.info(
       `${LOGGER_PREFIX} - customerStartTranscription - AmazonTranscribeFromCustomerAudioStream Sample Rate: ${customerStreamSampleRate}, target: ${customerTargetSampleRate}`
     );
@@ -810,6 +811,7 @@ async function customerStartTranscription() {
       {
         shouldStop: () => !IsCustomerTranscribing,
         onRetry: (details) => handleTranscribeRetry("customer", details),
+        targetSampleRate: customerTargetSampleRate,
       }
     );
 
@@ -869,7 +871,7 @@ async function agentStartTranscription() {
     const audioContext = await getAudioContext();
     AmazonTranscribeToCustomerAudioStream = await createMicrophoneStream(micConstraints, audioContext);
     const agentStreamSampleRate = audioContext.sampleRate;
-    const agentTargetSampleRate = Math.min(agentStreamSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+    const agentTargetSampleRate = getAutoSelectedSampleRate(agentStreamSampleRate);
     console.info(
       `${LOGGER_PREFIX} - agentStartTranscription - AmazonTranscribeToCustomerAudioStream Sample Rate: ${agentStreamSampleRate}, target: ${agentTargetSampleRate}`
     );
@@ -884,6 +886,7 @@ async function agentStartTranscription() {
       {
         shouldStop: () => !IsAgentTranscribing,
         onRetry: (details) => handleTranscribeRetry("agent", details),
+        targetSampleRate: agentTargetSampleRate,
       }
     );
 
@@ -1298,6 +1301,34 @@ function addTranscriptCard(originalTranscript, translatedTranscript, type) {
 
   // Auto scroll to the bottom
   CCP_V2V.UI.divTranscriptContainer.scrollTop = CCP_V2V.UI.divTranscriptContainer.scrollHeight;
+}
+
+function getAutoSelectedSampleRate(inputSampleRate) {
+  try {
+    const navigatorRef = typeof navigator !== "undefined" ? navigator : null;
+    const connection = navigatorRef?.connection || navigatorRef?.mozConnection || navigatorRef?.webkitConnection;
+    if (!connection) {
+      return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+    }
+
+    const { effectiveType, downlink, rtt, saveData } = connection;
+    if (saveData === true) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "slow-2g" || effectiveType === "2g") {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "3g" || (typeof downlink === "number" && downlink < 1.5) || (typeof rtt === "number" && rtt > 300)) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.medium);
+    }
+
+    return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.high);
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - getAutoSelectedSampleRate - Falling back to default sample rate`, error);
+    return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+  }
 }
 
 function handleTranscribeRetry(target, details) {

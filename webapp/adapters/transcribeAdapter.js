@@ -5,10 +5,10 @@ import { TRANSCRIBE_CONFIG } from "../config";
 import {
   LOGGER_PREFIX,
   TRANSCRIBE_PARTIAL_RESULTS_STABILITY,
+  TRANSCRIBE_TARGET_SAMPLE_RATE,
   TRANSCRIBE_RETRY_BASE_DELAY_MS,
   TRANSCRIBE_RETRY_MAX_ATTEMPTS,
   TRANSCRIBE_RETRY_MAX_DELAY_MS,
-  TRANSCRIBE_TARGET_SAMPLE_RATE,
 } from "../constants";
 import { getValidAwsCredentials, hasValidAwsCredentials } from "../utils/authUtility";
 import { isFunction, isObjectUndefinedNullEmpty, isStringUndefinedNullEmpty } from "../utils/commonUtility";
@@ -148,11 +148,12 @@ async function startStreamTranscriptionWithRetry(params, options) {
     maxAttempts = TRANSCRIBE_RETRY_MAX_ATTEMPTS,
     baseDelayMs = TRANSCRIBE_RETRY_BASE_DELAY_MS,
     maxDelayMs = TRANSCRIBE_RETRY_MAX_DELAY_MS,
+    targetSampleRate,
     onRetry,
     shouldStop,
   } = options;
 
-  const resolvedSampleRate = resolveTargetSampleRate(inputSampleRate);
+  const resolvedSampleRate = resolveTargetSampleRate(inputSampleRate, targetSampleRate);
   let attempt = 0;
   while (attempt <= maxAttempts) {
     if (shouldStop?.()) {
@@ -214,11 +215,12 @@ function wait(durationMs) {
   return new Promise((resolve) => setTimeout(resolve, durationMs));
 }
 
-function resolveTargetSampleRate(inputSampleRate) {
-  if (!Number.isInteger(TRANSCRIBE_TARGET_SAMPLE_RATE)) {
+function resolveTargetSampleRate(inputSampleRate, requestedTargetSampleRate) {
+  const targetSampleRate = Number.isInteger(requestedTargetSampleRate) ? requestedTargetSampleRate : TRANSCRIBE_TARGET_SAMPLE_RATE;
+  if (!Number.isInteger(targetSampleRate)) {
     return inputSampleRate;
   }
-  return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+  return Math.min(inputSampleRate, targetSampleRate);
 }
 
 function getPartialTranscript(transcriptResults = [], lastProcessedIndex = 0) {
