@@ -103,7 +103,17 @@ export class CognitoStack extends cdk.NestedStack {
     unauthenticatedRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["mobileanalytics:PutEvents", "cognito-sync:*"],
+        actions: [
+          "mobileanalytics:PutEvents",
+          "cognito-sync:*",
+          "polly:SynthesizeSpeech",
+          "polly:DescribeVoices",
+          "transcribe:StartStreamTranscription",
+          "transcribe:StartStreamTranscriptionWebSocket",
+          "translate:ListLanguages",
+          "translate:TranslateText",
+          "cognito-identity:GetCredentialsForIdentity",
+        ],
         resources: ["*"],
       })
     );

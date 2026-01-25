@@ -64,6 +64,21 @@ main {
   padding-left: 10px;
 }
 
+#languageStatus {
+  background-color: #fff;
+  padding: 10px;
+  border-radius: 5px;
+  margin-bottom: 10px;
+}
+
+.status-indicator {
+  background-color: #f0f4ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 6px;
+  padding: 10px;
+  font-weight: 600;
+}
+
 #ccpContainer {
   width: 100%;
   max-width: 325px;
