@@ -11,7 +11,9 @@ import {
   AUDIO_FEEDBACK_FILE_PATH,
   CUSTOMER_TRANSLATION_TO_CUSTOMER_VOLUME,
   LOGGER_PREFIX,
+  TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS,
   TRANSCRIBE_PARTIAL_RESULTS_STABILITY,
+  TRANSCRIBE_TARGET_SAMPLE_RATE,
 } from "./constants";
 import { getLoginUrl, getValidTokens, handleRedirect, isAuthenticated, logout, setRedirectURI, startTokenRefreshTimer } from "./utils/authUtility";
 import { AudioStreamManager } from "./managers/AudioStreamManager";
@@ -31,6 +33,8 @@ let CCP_V2V = {};
 let CurrentAgentConnectionId;
 let ConnectSoftPhoneManager;
 let IsAgentTranscriptionMuted = false;
+let IsCustomerTranscribing = false;
+let IsAgentTranscribing = false;
 
 // AudioContextManager to manage the AudioContext
 let AudioContextMgr = new AudioContextManager();
@@ -763,13 +767,15 @@ async function captureFromCustomerAudioStream() {
     throw new Error("No audio stream found from customer, please check you browser sound settings");
   }
 
-  const amazonTranscribeFromCustomerAudioStream = new MicrophoneStream();
+  const audioContext = await getAudioContext();
+  const amazonTranscribeFromCustomerAudioStream = new MicrophoneStream({ audioContext });
   amazonTranscribeFromCustomerAudioStream.setStream(audioStream);
   return amazonTranscribeFromCustomerAudioStream;
 }
 
 async function customerStartTranscription() {
   try {
+    IsCustomerTranscribing = true;
     if (CCP_V2V.UI.customerStreamMicCheckbox.checked === true) {
       //we want agent to hear the customer's original voice, so we reduce the fromCustomerAudioElement volume
       CCP_V2V.UI.fromCustomerAudioElement.volume = 0.3;
@@ -789,8 +795,11 @@ async function customerStartTranscription() {
 
     //getting the remote audio stream from the current RTC session into AmazonTranscribeFromCustomerAudioStream variable
     AmazonTranscribeFromCustomerAudioStream = await captureFromCustomerAudioStream();
-    const customerStreamSampleRate = AudioContextMgr.getActualSampleRate();
-    console.info(`${LOGGER_PREFIX} - customerStartTranscription - AmazonTranscribeFromCustomerAudioStream Sample Rate: ${customerStreamSampleRate}`);
+    const customerStreamSampleRate = (await getAudioContext()).sampleRate;
+    const customerTargetSampleRate = getAutoSelectedSampleRate(customerStreamSampleRate);
+    console.info(
+      `${LOGGER_PREFIX} - customerStartTranscription - AmazonTranscribeFromCustomerAudioStream Sample Rate: ${customerStreamSampleRate}, target: ${customerTargetSampleRate}`
+    );
 
     startCustomerStreamTranscription(
       AmazonTranscribeFromCustomerAudioStream,
@@ -798,7 +807,12 @@ async function customerStartTranscription() {
       CCP_V2V.UI.customerTranscribeLanguageSelect.value,
       CCP_V2V.UI.customerTranscribePartialResultsStabilitySelect.value,
       handleCustomerTranscript,
-      handleCustomerPartialTranscript
+      handleCustomerPartialTranscript,
+      {
+        shouldStop: () => !IsCustomerTranscribing,
+        onRetry: (details) => handleTranscribeRetry("customer", details),
+        targetSampleRate: customerTargetSampleRate,
+      }
     );
 
     CCP_V2V.UI.customerTranscribeLanguageSelect.disabled = true;
@@ -808,10 +822,12 @@ async function customerStartTranscription() {
   } catch (error) {
     console.error(`${LOGGER_PREFIX} - customerStartTranscription - Error starting customer transcription:`, error);
     raiseError(`Error starting customer transcription: ${error}`);
+    IsCustomerTranscribing = false;
   }
 }
 
 async function customerStopTranscription() {
+  IsCustomerTranscribing = false;
   if (AmazonTranscribeFromCustomerAudioStream) {
     //replace the stream with a silent stream
     const audioContext = await getAudioContext();
@@ -833,6 +849,7 @@ async function customerStopTranscription() {
 
 async function agentStartTranscription() {
   try {
+    IsAgentTranscribing = true;
     const selectedMic = CCP_V2V.UI.micSelect.value;
     const micConstraints = getMicrophoneConstraints(selectedMic);
 
@@ -851,9 +868,13 @@ async function agentStartTranscription() {
     }
 
     //getting the local Mic stream into AmazonTranscribeMicStream variable
-    AmazonTranscribeToCustomerAudioStream = await createMicrophoneStream(micConstraints);
-    const agentStreamSampleRate = AudioContextMgr.getActualSampleRate();
-    console.info(`${LOGGER_PREFIX} - agentStartTranscription - AmazonTranscribeToCustomerAudioStream Sample Rate: ${agentStreamSampleRate}`);
+    const audioContext = await getAudioContext();
+    AmazonTranscribeToCustomerAudioStream = await createMicrophoneStream(micConstraints, audioContext);
+    const agentStreamSampleRate = audioContext.sampleRate;
+    const agentTargetSampleRate = getAutoSelectedSampleRate(agentStreamSampleRate);
+    console.info(
+      `${LOGGER_PREFIX} - agentStartTranscription - AmazonTranscribeToCustomerAudioStream Sample Rate: ${agentStreamSampleRate}, target: ${agentTargetSampleRate}`
+    );
 
     startAgentStreamTranscription(
       AmazonTranscribeToCustomerAudioStream,
@@ -861,7 +882,12 @@ async function agentStartTranscription() {
       CCP_V2V.UI.agentTranscribeLanguageSelect.value,
       CCP_V2V.UI.agentTranscribePartialResultsStabilitySelect.value,
       handleAgentTranscript,
-      handleAgentPartialTranscript
+      handleAgentPartialTranscript,
+      {
+        shouldStop: () => !IsAgentTranscribing,
+        onRetry: (details) => handleTranscribeRetry("agent", details),
+        targetSampleRate: agentTargetSampleRate,
+      }
     );
 
     CCP_V2V.UI.agentTranscribeLanguageSelect.disabled = true;
@@ -873,10 +899,12 @@ async function agentStartTranscription() {
   } catch (error) {
     console.error(`${LOGGER_PREFIX} - agentStartTranscription - Error starting agent transcription:`, error);
     raiseError(`Error starting agent transcription: ${error}`);
+    IsAgentTranscribing = false;
   }
 }
 
 async function agentStopTranscription() {
+  IsAgentTranscribing = false;
   if (AmazonTranscribeToCustomerAudioStream) {
     //replace the stream with a silent stream
     const audioContext = await getAudioContext();
@@ -1273,6 +1301,48 @@ function addTranscriptCard(originalTranscript, translatedTranscript, type) {
 
   // Auto scroll to the bottom
   CCP_V2V.UI.divTranscriptContainer.scrollTop = CCP_V2V.UI.divTranscriptContainer.scrollHeight;
+}
+
+function getAutoSelectedSampleRate(inputSampleRate) {
+  try {
+    const navigatorRef = typeof navigator !== "undefined" ? navigator : null;
+    const connection = navigatorRef?.connection || navigatorRef?.mozConnection || navigatorRef?.webkitConnection;
+    if (!connection) {
+      return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+    }
+
+    const { effectiveType, downlink, rtt, saveData } = connection;
+    if (saveData === true) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "slow-2g" || effectiveType === "2g") {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
+    }
+
+    if (effectiveType === "3g" || (typeof downlink === "number" && downlink < 1.5) || (typeof rtt === "number" && rtt > 300)) {
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.medium);
+    }
+
+    return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.high);
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - getAutoSelectedSampleRate - Falling back to default sample rate`, error);
+    return Math.min(inputSampleRate, TRANSCRIBE_TARGET_SAMPLE_RATE);
+  }
+}
+
+function handleTranscribeRetry(target, details) {
+  const message = `Reconnecting transcription (attempt ${details.attempt})...`;
+  if (target === "customer") {
+    setBackgroundColour(CCP_V2V.UI.customerTranscriptionTextOutputDiv, "bg-pale-yellow");
+    CCP_V2V.UI.customerTranscriptionTextOutputDiv.textContent = message;
+    return;
+  }
+
+  if (target === "agent") {
+    setBackgroundColour(CCP_V2V.UI.agentTranscriptionTextOutputDiv, "bg-pale-yellow");
+    CCP_V2V.UI.agentTranscriptionTextOutputDiv.textContent = message;
+  }
 }
 
 function clearTranscriptCards() {
