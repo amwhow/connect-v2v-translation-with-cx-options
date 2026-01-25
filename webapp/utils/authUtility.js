@@ -312,6 +312,39 @@ async function getCognitoIdentityCredentials(idToken) {
   }
 }
 
+async function getUnauthenticatedCredentials() {
+  const identityParams = {
+    IdentityPoolId: COGNITO_CONFIG.identityPoolId,
+  };
+
+  try {
+    const cognitoIdentity = new AWS.CognitoIdentity({
+      region: COGNITO_CONFIG.region,
+    });
+    const { IdentityId } = await cognitoIdentity.getId(identityParams).promise();
+
+    const cognitoCredentialsForIdentity = await cognitoIdentity
+      .getCredentialsForIdentity({
+        IdentityId,
+      })
+      .promise();
+
+    const credentials = {
+      accessKeyId: cognitoCredentialsForIdentity.Credentials.AccessKeyId,
+      secretAccessKey: cognitoCredentialsForIdentity.Credentials.SecretKey,
+      sessionToken: cognitoCredentialsForIdentity.Credentials.SessionToken,
+      expiration: cognitoCredentialsForIdentity.Credentials.Expiration,
+    };
+
+    console.info(`${LOGGER_PREFIX} - getUnauthenticatedCredentials - Cognito guest credentials obtained, expire at ${credentials.expiration.toISOString()}`);
+    setAwsCredentials(credentials);
+    return credentials;
+  } catch (error) {
+    console.error(`${LOGGER_PREFIX} - getUnauthenticatedCredentials - Error getting guest credentials:`, error);
+    throw error;
+  }
+}
+
 // Get AWS credentials using Cognito Identity Pool
 export async function getValidAwsCredentials() {
   try {
@@ -319,10 +352,15 @@ export async function getValidAwsCredentials() {
       return getAwsCredentials();
     }
 
+    const refreshToken = localStorage.getItem("refreshToken");
+    if (refreshToken == null) {
+      return await getUnauthenticatedCredentials();
+    }
+
     const tokens = await getValidTokens();
 
     if (tokens?.accessToken == null || tokens?.idToken == null || tokens?.refreshToken == null) {
-      throw new Error("No tokens available");
+      return await getUnauthenticatedCredentials();
     }
 
     // Configure the credentials provider

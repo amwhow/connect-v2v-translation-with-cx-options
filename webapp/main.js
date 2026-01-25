@@ -15,7 +15,16 @@ import {
   TRANSCRIBE_PARTIAL_RESULTS_STABILITY,
   TRANSCRIBE_TARGET_SAMPLE_RATE,
 } from "./constants";
-import { getLoginUrl, getValidTokens, handleRedirect, isAuthenticated, logout, setRedirectURI, startTokenRefreshTimer } from "./utils/authUtility";
+import {
+  getLoginUrl,
+  getValidTokens,
+  getValidAwsCredentials,
+  handleRedirect,
+  isAuthenticated,
+  logout,
+  setRedirectURI,
+  startTokenRefreshTimer,
+} from "./utils/authUtility";
 import { AudioStreamManager } from "./managers/AudioStreamManager";
 import { SessionTrackManager, TrackType } from "./managers/SessionTrackManager";
 import { createMicrophoneStream } from "./utils/transcribeUtils";
@@ -177,8 +186,9 @@ async function initializeApp() {
       return;
     }
 
-    // Check authentication and token expiration
-    if (!isAuthenticated() && !embeddedConnectApp) {
+    if (embeddedConnectApp) {
+      await getValidAwsCredentials();
+    } else if (!isAuthenticated()) {
       const tokens = await getValidTokens();
       if (tokens?.accessToken == null || tokens?.idToken == null || tokens?.refreshToken == null) {
         // No valid token available, redirect to login
