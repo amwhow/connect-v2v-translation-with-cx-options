@@ -90,6 +90,8 @@ export class AudioContextManager {
           await this.audioContext.resume();
           console.info(`${LOGGER_PREFIX} - AudioContext state is [${this.audioContext.state}]`);
           this.removeUserInteractionListeners();
+          // ✅ NEW: Clear the promise so subsequent calls don't re-use it
+          this.interactionPromise = null;
           overlay.remove();
           resolve();
         } catch (error) {
