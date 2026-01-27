@@ -244,6 +244,44 @@ button:disabled {
   margin-top: 5px;
 }
 
+#statusIndicatorSection {
+  background-color: #f9f9f9;
+  border: 1px solid #ddd;
+  border-radius: 5px;
+  padding: 8px;
+  margin-bottom: 10px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-weight: bold;
+  font-size: 1em;
+  background-color: #eef2f7;
+  border: 1px solid #cbd5e1;
+}
+
+.status-indicator--idle {
+  color: #6b7280;
+  background-color: #f3f4f6;
+  border-color: #e5e7eb;
+}
+
+.status-indicator--detecting {
+  color: #92400e;
+  background-color: #fef3c7;
+  border-color: #fde68a;
+}
+
+.status-indicator--active {
+  color: #14532d;
+  background-color: #dcfce7;
+  border-color: #86efac;
+}
+
 .audio-group {
   background-color: #f9f9f9;
   border: 1px solid #ddd;
