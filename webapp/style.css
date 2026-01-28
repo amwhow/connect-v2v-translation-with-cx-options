@@ -24,6 +24,76 @@ header {
   padding: 5px 0;
 }
 
+#diagnosticsSection {
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+
+#diagnosticsSection h2 {
+  border-bottom: none;
+  margin: 0 0 6px;
+  font-size: 1.1em;
+  color: #0f172a;
+}
+
+.diagnostic-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diagnostic-row {
+  display: grid;
+  grid-template-columns: 180px 110px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+}
+
+.diagnostic-title {
+  font-weight: bold;
+  color: #1f2937;
+}
+
+.diagnostic-status {
+  font-weight: bold;
+  text-align: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 0.95em;
+}
+
+.diagnostic-status--unknown {
+  background-color: #f1f5f9;
+  color: #64748b;
+}
+
+.diagnostic-status--ok {
+  background-color: #dcfce7;
+  color: #14532d;
+}
+
+.diagnostic-status--warning {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.diagnostic-status--error {
+  background-color: #fee2e2;
+  color: #991b1b;
+}
+
+.diagnostic-detail {
+  color: #475569;
+  font-size: 0.95em;
+}
+
 h1 {
   font-size: 1.4em;
   margin: 0;

@@ -26,6 +26,7 @@ import { CONNECT_CONFIG } from "./config";
 import { AudioContextManager } from "./managers/AudioContextManager";
 import { AudioInputTestManager } from "./managers/InputTestManager";
 import { createStatusIndicator } from "./StatusIndicator";
+import { createDiagnosticsPanel } from "./DiagnosticsPanel";
 
 let connect = {};
 let CurrentUser = {};
@@ -94,6 +95,40 @@ let ToCustomerAudioStreamManager;
 let ToAgentAudioStreamManager;
 
 let StatusIndicatorComponent;
+let DiagnosticsPanel;
+
+const DIAGNOSTIC_FACTORS = [
+  {
+    key: "firewall",
+    label: "Enterprise Firewall",
+    detail: "WebSocket blocked? Try a personal hotspot to confirm.",
+  },
+  {
+    key: "clockSkew",
+    label: "Clock Skew",
+    detail: "Sync system clock if AWS rejects signatures.",
+  },
+  {
+    key: "latency",
+    label: "Latency & Region Distance",
+    detail: "High latency/jitter can delay WSS handshake.",
+  },
+  {
+    key: "browserPermissions",
+    label: "Browser Permissions",
+    detail: "Microphone access must be allowed.",
+  },
+  {
+    key: "audioStream",
+    label: "Audio Stream",
+    detail: "Check mic stream and sample rate.",
+  },
+  {
+    key: "credentials",
+    label: "Cognito Credentials",
+    detail: "Expired tokens will block Transcribe.",
+  },
+];
 
 async function getAudioContext() {
   if (AudioContextMgr == null) {
@@ -178,6 +213,8 @@ const onLoad = async () => {
   bindUIElements();
   StatusIndicatorComponent = createStatusIndicator(CCP_V2V.UI.statusIndicatorContainer);
   StatusIndicatorComponent.setIdle();
+  DiagnosticsPanel = createDiagnosticsPanel(CCP_V2V.UI.diagnosticsContainer, DIAGNOSTIC_FACTORS);
+  DiagnosticsPanel.setAllUnknown();
   initEventListeners();
   CCP_V2V.UI.logoutButton.style.display = "block";
   getDevices();
@@ -199,6 +236,7 @@ const bindUIElements = () => {
     divInstanceSetup: document.getElementById("divInstanceSetup"),
     divMain: document.getElementById("divMain"),
     statusIndicatorContainer: document.getElementById("statusIndicatorContainer"),
+    diagnosticsContainer: document.getElementById("diagnosticsContainer"),
 
     ccpContainer: document.querySelector("#ccpContainer"),
 
@@ -613,6 +651,7 @@ function onContactConnected(contact) {
   applyLanguageSelectionForContact(contact).catch((error) => {
     console.error(`${LOGGER_PREFIX} - onContactConnected - Failed to apply language selection`, error);
   });
+  updateLatencyDiagnostics();
 
   CCP_V2V.UI.customerStartTranscriptionButton.disabled = false;
   CCP_V2V.UI.agentStartTranscriptionButton.disabled = false;
@@ -622,6 +661,7 @@ function onContactEnded(contact) {
   console.info(`${LOGGER_PREFIX} - contact has ended`, contact);
   CurrentAgentConnectionId = null;
   StatusIndicatorComponent?.setIdle();
+  DiagnosticsPanel?.setAllUnknown();
   if (ToCustomerAudioStreamManager != null) {
     ToCustomerAudioStreamManager.dispose();
     ToCustomerAudioStreamManager = null;
@@ -762,8 +802,10 @@ async function getDevices() {
     }
     if (micPermission.state === "denied") {
       raiseError("Microphone permission is denied. Please allow microphone access in your browser settings.");
+      setDiagnosticStatus("browserPermissions", "error", "Microphone permission denied.");
       return;
     }
+    setDiagnosticStatus("browserPermissions", "ok", "Microphone permission granted.");
 
     // Get all media devices (input and output)
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -833,6 +875,7 @@ async function getDevices() {
     }
   } catch (err) {
     console.error(`${LOGGER_PREFIX} - getDevices - Error accessing devices:`, err);
+    updateAudioDiagnostics({ error: err });
   }
 }
 
@@ -891,6 +934,7 @@ async function captureFromCustomerAudioStream() {
   const audioStream = session?._remoteAudioStream;
   if (audioStream == null) {
     console.error(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - No audio stream found from customer`);
+    setDiagnosticStatus("audioStream", "error", "Customer audio stream unavailable from Connect.");
     throw new Error("No audio stream found from customer, please check you browser sound settings");
   }
 
@@ -903,6 +947,7 @@ async function captureFromCustomerAudioStream() {
 async function customerStartTranscription() {
   try {
     IsCustomerTranscribing = true;
+    updateLatencyDiagnostics();
     if (CCP_V2V.UI.customerStreamMicCheckbox.checked === true) {
       //we want agent to hear the customer's original voice, so we reduce the fromCustomerAudioElement volume
       CCP_V2V.UI.fromCustomerAudioElement.volume = 0.3;
@@ -927,6 +972,11 @@ async function customerStartTranscription() {
     console.info(
       `${LOGGER_PREFIX} - customerStartTranscription - AmazonTranscribeFromCustomerAudioStream Sample Rate: ${customerStreamSampleRate}, target: ${customerTargetSampleRate}`
     );
+    updateAudioDiagnostics({
+      streamType: "customer",
+      sampleRate: customerStreamSampleRate,
+      targetSampleRate: customerTargetSampleRate,
+    });
 
     startCustomerStreamTranscription(
       AmazonTranscribeFromCustomerAudioStream,
@@ -949,6 +999,8 @@ async function customerStartTranscription() {
   } catch (error) {
     console.error(`${LOGGER_PREFIX} - customerStartTranscription - Error starting customer transcription:`, error);
     raiseError(`Error starting customer transcription: ${error}`);
+    analyzeTranscribeError(error);
+    updateAudioDiagnostics({ streamType: "customer", error });
     IsCustomerTranscribing = false;
   }
 }
@@ -977,6 +1029,7 @@ async function customerStopTranscription() {
 async function agentStartTranscription() {
   try {
     IsAgentTranscribing = true;
+    updateLatencyDiagnostics();
     const selectedMic = CCP_V2V.UI.micSelect.value;
     const micConstraints = getMicrophoneConstraints(selectedMic);
 
@@ -1002,6 +1055,11 @@ async function agentStartTranscription() {
     console.info(
       `${LOGGER_PREFIX} - agentStartTranscription - AmazonTranscribeToCustomerAudioStream Sample Rate: ${agentStreamSampleRate}, target: ${agentTargetSampleRate}`
     );
+    updateAudioDiagnostics({
+      streamType: "agent",
+      sampleRate: agentStreamSampleRate,
+      targetSampleRate: agentTargetSampleRate,
+    });
 
     startAgentStreamTranscription(
       AmazonTranscribeToCustomerAudioStream,
@@ -1026,6 +1084,8 @@ async function agentStartTranscription() {
   } catch (error) {
     console.error(`${LOGGER_PREFIX} - agentStartTranscription - Error starting agent transcription:`, error);
     raiseError(`Error starting agent transcription: ${error}`);
+    analyzeTranscribeError(error);
+    updateAudioDiagnostics({ streamType: "agent", error });
     IsAgentTranscribing = false;
   }
 }
@@ -1401,6 +1461,108 @@ function setBackgroundColour(element, cssClass) {
   }
 }
 
+function setDiagnosticStatus(key, status, detail) {
+  DiagnosticsPanel?.setStatus(key, status, detail);
+}
+
+function updateLatencyDiagnostics() {
+  try {
+    const navigatorRef = typeof navigator !== "undefined" ? navigator : null;
+    const connection = navigatorRef?.connection || navigatorRef?.mozConnection || navigatorRef?.webkitConnection;
+    if (!connection) {
+      setDiagnosticStatus("latency", "unknown", "Network info unavailable.");
+      return;
+    }
+
+    const { effectiveType, downlink, rtt, saveData } = connection;
+    const detailParts = [];
+    if (effectiveType) detailParts.push(`Type: ${effectiveType}`);
+    if (typeof downlink === "number") detailParts.push(`Downlink: ${downlink} Mbps`);
+    if (typeof rtt === "number") detailParts.push(`RTT: ${rtt} ms`);
+    if (saveData === true) detailParts.push("Save-Data enabled");
+
+    const detail = detailParts.join(" · ");
+    if (saveData === true || effectiveType === "2g" || effectiveType === "slow-2g" || (typeof rtt === "number" && rtt > 250)) {
+      setDiagnosticStatus("latency", "warning", detail || "High latency or data saver enabled.");
+      return;
+    }
+
+    setDiagnosticStatus("latency", "ok", detail || "Network conditions look healthy.");
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - updateLatencyDiagnostics - Unable to read network info`, error);
+    setDiagnosticStatus("latency", "unknown", "Unable to read network metrics.");
+  }
+}
+
+function normalizeErrorMessage(error) {
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  if (error.message) return error.message.toString();
+  return JSON.stringify(error);
+}
+
+function analyzeTranscribeError(error) {
+  const message = normalizeErrorMessage(error).toLowerCase();
+  const errorName = error?.name?.toLowerCase?.() ?? "";
+  const errorCode = error?.code?.toLowerCase?.() ?? "";
+
+  if (message.includes("expired") || message.includes("security token") || errorCode.includes("expired") || errorName.includes("expiredtoken")) {
+    setDiagnosticStatus("credentials", "error", "AWS credentials expired. Re-login to refresh.");
+  }
+
+  if (
+    message.includes("requesttimetooskewed") ||
+    message.includes("signature") ||
+    message.includes("invalidsignature") ||
+    message.includes("clock") ||
+    errorName.includes("signature") ||
+    errorCode.includes("signature")
+  ) {
+    setDiagnosticStatus("clockSkew", "error", "System clock appears out of sync. Sync time and retry.");
+  }
+
+  if (
+    message.includes("networkerror") ||
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("econn") ||
+    message.includes("enetunreach") ||
+    message.includes("websocket") ||
+    message.includes("failed to fetch")
+  ) {
+    setDiagnosticStatus("firewall", "warning", "Network blocked or websocket denied. Try a hotspot.");
+  }
+
+  if (message.includes("forbidden") || message.includes("403")) {
+    setDiagnosticStatus("credentials", "error", "Forbidden by AWS. Check IAM/region permissions.");
+  }
+}
+
+function updateAudioDiagnostics({ streamType, sampleRate, targetSampleRate, error } = {}) {
+  if (error) {
+    const message = normalizeErrorMessage(error);
+    if (message.toLowerCase().includes("notallowed") || message.toLowerCase().includes("permission")) {
+      setDiagnosticStatus("browserPermissions", "error", "Microphone permission denied.");
+      setDiagnosticStatus("audioStream", "error", "Audio stream blocked by permissions.");
+      return;
+    }
+    setDiagnosticStatus("audioStream", "error", message);
+    return;
+  }
+
+  if (streamType === "customer" && sampleRate == null) {
+    setDiagnosticStatus("audioStream", "error", "Customer audio stream unavailable.");
+    return;
+  }
+
+  const detailParts = [];
+  if (streamType) detailParts.push(`Stream: ${streamType}`);
+  if (sampleRate) detailParts.push(`Sample rate: ${sampleRate} Hz`);
+  if (targetSampleRate) detailParts.push(`Target: ${targetSampleRate} Hz`);
+
+  setDiagnosticStatus("audioStream", "ok", detailParts.join(" · ") || "Audio stream healthy.");
+}
+
 function addTranscriptCard(originalTranscript, translatedTranscript, type) {
   const card = document.createElement("div");
   card.className = `transcript-card ${type}`; // type is either 'fromAgent' or 'toAgent'
@@ -1460,6 +1622,10 @@ function getAutoSelectedSampleRate(inputSampleRate) {
 
 function handleTranscribeRetry(target, details) {
   const message = `Reconnecting transcription (attempt ${details.attempt})...`;
+  if (details?.error) {
+    analyzeTranscribeError(details.error);
+    setDiagnosticStatus("firewall", "warning", "Retrying Transcribe connection; potential firewall or network block.");
+  }
   if (target === "customer") {
     setBackgroundColour(CCP_V2V.UI.customerTranscriptionTextOutputDiv, "bg-pale-yellow");
     CCP_V2V.UI.customerTranscriptionTextOutputDiv.textContent = message;
