@@ -125,6 +125,73 @@ const DIAGNOSTIC_FACTORS = [
   },
 ];
 
+let StatusIndicatorComponent;
+let DiagnosticsPanel;
+
+const DIAGNOSTIC_FACTORS = [
+  {
+    key: "firewall",
+    label: "Enterprise Firewall",
+    detail: "WebSocket blocked? Try a personal hotspot to confirm.",
+  },
+  {
+    key: "latency",
+    label: "Latency & Region Distance",
+    detail: "High latency/jitter can delay WSS handshake.",
+  },
+  {
+    key: "browserPermissions",
+    label: "Browser Permissions",
+    detail: "Microphone access must be allowed.",
+  },
+  {
+    key: "audioStream",
+    label: "Audio Stream",
+    detail: "Check mic stream and sample rate.",
+  },
+  {
+    key: "credentials",
+    label: "Cognito Credentials",
+    detail: "Expired tokens will block Transcribe.",
+  },
+];
+
+let StatusIndicatorComponent;
+let DiagnosticsPanel;
+
+const DIAGNOSTIC_FACTORS = [
+  {
+    key: "firewall",
+    label: "Enterprise Firewall",
+    detail: "WebSocket blocked? Try a personal hotspot to confirm.",
+  },
+  {
+    key: "clockSkew",
+    label: "Clock Skew",
+    detail: "Sync system clock if AWS rejects signatures.",
+  },
+  {
+    key: "latency",
+    label: "Latency & Region Distance",
+    detail: "High latency/jitter can delay WSS handshake.",
+  },
+  {
+    key: "browserPermissions",
+    label: "Browser Permissions",
+    detail: "Microphone access must be allowed.",
+  },
+  {
+    key: "audioStream",
+    label: "Audio Stream",
+    detail: "Check mic stream and sample rate.",
+  },
+  {
+    key: "credentials",
+    label: "Cognito Credentials",
+    detail: "Expired tokens will block Transcribe.",
+  },
+];
+
 async function getAudioContext() {
   if (AudioContextMgr == null) {
     AudioContextMgr = new AudioContextManager();
