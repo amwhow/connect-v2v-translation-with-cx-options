@@ -15,7 +15,7 @@ import {
   TRANSCRIBE_PARTIAL_RESULTS_STABILITY,
   TRANSCRIBE_TARGET_SAMPLE_RATE,
 } from "./constants";
-import { getLoginUrl, getValidTokens, handleRedirect, isAuthenticated, logout, setRedirectURI, startTokenRefreshTimer } from "./utils/authUtility";
+import { decodeToken, getLoginUrl, getValidTokens, handleRedirect, hasValidAwsCredentials, isAuthenticated, logout, setRedirectURI, startTokenRefreshTimer } from "./utils/authUtility";
 import { AudioStreamManager } from "./managers/AudioStreamManager";
 import { SessionTrackManager, TrackType } from "./managers/SessionTrackManager";
 import { createMicrophoneStream } from "./utils/transcribeUtils";
@@ -93,6 +93,37 @@ let ToCustomerAudioStreamManager;
 
 // AudioStreamManager to manage the stream that goes to Agent
 let ToAgentAudioStreamManager;
+
+let StatusIndicatorComponent;
+let DiagnosticsPanel;
+
+const DIAGNOSTIC_FACTORS = [
+  {
+    key: "firewall",
+    label: "Enterprise Firewall",
+    detail: "WebSocket blocked? Try a personal hotspot to confirm.",
+  },
+  {
+    key: "latency",
+    label: "Latency & Region Distance",
+    detail: "High latency/jitter can delay WSS handshake.",
+  },
+  {
+    key: "browserPermissions",
+    label: "Browser Permissions",
+    detail: "Microphone access must be allowed.",
+  },
+  {
+    key: "audioStream",
+    label: "Audio Stream",
+    detail: "Check mic stream and sample rate.",
+  },
+  {
+    key: "credentials",
+    label: "Cognito Credentials",
+    detail: "Expired tokens will block Transcribe.",
+  },
+];
 
 let StatusIndicatorComponent;
 let DiagnosticsPanel;
@@ -215,6 +246,7 @@ const onLoad = async () => {
   StatusIndicatorComponent.setIdle();
   DiagnosticsPanel = createDiagnosticsPanel(CCP_V2V.UI.diagnosticsContainer, DIAGNOSTIC_FACTORS);
   DiagnosticsPanel.setAllUnknown();
+  updateCredentialDiagnostics();
   initEventListeners();
   CCP_V2V.UI.logoutButton.style.display = "block";
   getDevices();
@@ -989,6 +1021,7 @@ async function customerStartTranscription() {
         shouldStop: () => !IsCustomerTranscribing,
         onRetry: (details) => handleTranscribeRetry("customer", details),
         targetSampleRate: customerTargetSampleRate,
+        ...getTranscribeRetryOptions(),
       }
     );
 
@@ -1072,6 +1105,7 @@ async function agentStartTranscription() {
         shouldStop: () => !IsAgentTranscribing,
         onRetry: (details) => handleTranscribeRetry("agent", details),
         targetSampleRate: agentTargetSampleRate,
+        ...getTranscribeRetryOptions(),
       }
     );
 
@@ -1465,6 +1499,36 @@ function setDiagnosticStatus(key, status, detail) {
   DiagnosticsPanel?.setStatus(key, status, detail);
 }
 
+function updateCredentialDiagnostics() {
+  try {
+    if (hasValidAwsCredentials()) {
+      setDiagnosticStatus("credentials", "ok", "AWS credentials valid.");
+      return;
+    }
+
+    const idToken = window.localStorage.getItem("idToken");
+    if (idToken) {
+      const payload = decodeToken(idToken);
+      if (payload?.exp) {
+        const expiryMs = payload.exp * 1000;
+        const remainingMs = expiryMs - Date.now();
+        if (remainingMs <= 0) {
+          setDiagnosticStatus("credentials", "error", "Cognito token expired. Re-login required.");
+        } else {
+          const minutes = Math.max(1, Math.floor(remainingMs / 60000));
+          setDiagnosticStatus("credentials", "warning", `Token valid for ~${minutes} min. Refreshing soon.`);
+        }
+        return;
+      }
+    }
+
+    setDiagnosticStatus("credentials", "unknown", "Credential state not yet determined.");
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - updateCredentialDiagnostics - Unable to read credentials`, error);
+    setDiagnosticStatus("credentials", "unknown", "Unable to read credential state.");
+  }
+}
+
 function updateLatencyDiagnostics() {
   try {
     const navigatorRef = typeof navigator !== "undefined" ? navigator : null;
@@ -1508,6 +1572,8 @@ function analyzeTranscribeError(error) {
 
   if (message.includes("expired") || message.includes("security token") || errorCode.includes("expired") || errorName.includes("expiredtoken")) {
     setDiagnosticStatus("credentials", "error", "AWS credentials expired. Re-login to refresh.");
+  } else {
+    updateCredentialDiagnostics();
   }
 
   if (
@@ -1518,7 +1584,7 @@ function analyzeTranscribeError(error) {
     errorName.includes("signature") ||
     errorCode.includes("signature")
   ) {
-    setDiagnosticStatus("clockSkew", "error", "System clock appears out of sync. Sync time and retry.");
+    setDiagnosticStatus("credentials", "error", "Signature rejected. Check system clock sync.");
   }
 
   if (
@@ -1561,6 +1627,25 @@ function updateAudioDiagnostics({ streamType, sampleRate, targetSampleRate, erro
   if (targetSampleRate) detailParts.push(`Target: ${targetSampleRate} Hz`);
 
   setDiagnosticStatus("audioStream", "ok", detailParts.join(" · ") || "Audio stream healthy.");
+}
+
+function getTranscribeRetryOptions() {
+  const navigatorRef = typeof navigator !== "undefined" ? navigator : null;
+  const connection = navigatorRef?.connection || navigatorRef?.mozConnection || navigatorRef?.webkitConnection;
+  if (!connection) {
+    return {};
+  }
+
+  const { effectiveType, rtt } = connection;
+  if (effectiveType === "3g" || effectiveType === "2g" || effectiveType === "slow-2g" || (typeof rtt === "number" && rtt > 250)) {
+    return {
+      maxAttempts: 6,
+      baseDelayMs: 1000,
+      maxDelayMs: 15000,
+    };
+  }
+
+  return {};
 }
 
 function addTranscriptCard(originalTranscript, translatedTranscript, type) {
@@ -1610,7 +1695,7 @@ function getAutoSelectedSampleRate(inputSampleRate) {
     }
 
     if (effectiveType === "3g" || (typeof downlink === "number" && downlink < 1.5) || (typeof rtt === "number" && rtt > 300)) {
-      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.medium);
+      return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.low);
     }
 
     return Math.min(inputSampleRate, TRANSCRIBE_AUTO_SAMPLE_RATE_PRESETS.high);
