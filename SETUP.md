@@ -140,6 +140,42 @@ To be able to make changes in the Webapp and test them locally, without re-deplo
 9. Please make sure you add `https://localhost:5173` as Amazon Connect Approved Origin (see Step 6 in **Solution setup** -> **Configure Amazon Connect Approved Origins**)
 10. Once happy with the changes, navigate to `connect-v2v-translation-with-cx-options/cdk-stacks` and `npm run build:deploy:all` (On Windows devices use `npm run build:deploy:all:gitbash`)
 
+## Transcript storage (manual AWS console setup)
+
+If you want to persist transcripts without modifying the CDK stacks, you can create the transcript-storage resources manually in the AWS console and point the webapp at a static API URL.
+
+### Resource names to use
+
+- **Lambda function name:** `AmazonConnectV2V-TranscriptWriter`
+- **S3 bucket name:** `amazonconnectv2v-transcripts-<account-id>-<region>` (lowercase, globally unique; replace `<account-id>` and `<region>`)
+- **HTTP API name:** `AmazonConnectV2V-TranscriptApi`
+- **Route:** `POST /transcripts`
+
+### Console steps (high level)
+
+1. **Create the S3 bucket**
+   - Name: `amazonconnectv2v-transcripts-<account-id>-<region>`
+   - Block public access: **On**
+   - Default encryption: **SSE-S3** (or **SSE-KMS** if you prefer)
+
+2. **Create the Lambda function**
+   - Name: `AmazonConnectV2V-TranscriptWriter`
+   - Runtime: Node.js 20
+   - Handler: `index.handler`
+   - Environment variable: `TRANSCRIPT_BUCKET` set to your bucket name
+   - IAM permissions: allow `s3:PutObject` on `arn:aws:s3:::amazonconnectv2v-transcripts-<account-id>-<region>/*`
+   - Use the handler code in `cdk-stacks/lambdas/transcript-storage/index.js`
+
+3. **Create the HTTP API (API Gateway)**
+   - Name: `AmazonConnectV2V-TranscriptApi`
+   - Add `POST /transcripts` route -> integrate with the Lambda function
+   - Enable CORS for your webapp domain (allow `POST, OPTIONS`, allow header `Content-Type`)
+
+4. **Point the webapp at the API URL**
+   - Update the deployed `frontend-config.js` (in your webapp S3 bucket) to include:
+     `window.WebappConfig.transcriptApiUrl = "https://<api-id>.execute-api.<region>.amazonaws.com/transcripts";`
+   - The frontend reads this value as `TRANSCRIPT_STORAGE_CONFIG.transcriptApiUrl` and uses it when flushing buffered transcripts on contact end.
+
 ## Clean up
 
 To remove the solution from your account, please follow these steps:
