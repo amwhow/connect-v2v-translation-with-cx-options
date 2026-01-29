@@ -9,6 +9,7 @@ const configParams = require("../config/config.params.json");
 
 import { CognitoStack } from "./infrastructure/cognito-stack";
 import { FrontendConfigStack } from "./frontend/frontend-config-stack";
+import { TranscriptStorageStack } from "./infrastructure/transcript-storage-stack";
 
 export class CdkBackendStack extends cdk.Stack {
   public readonly backendStackOutputs: { key: string; value: string }[];
@@ -31,6 +32,10 @@ export class CdkBackendStack extends cdk.Stack {
       cdkAppName: configParams["CdkAppName"],
     });
 
+    const transcriptStorageStack = new TranscriptStorageStack(this, "TranscriptStorageStack", {
+      cdkAppName: configParams["CdkAppName"],
+    });
+
     /**************************************************************************************************************
      * CDK Outputs *
      **************************************************************************************************************/
@@ -46,9 +51,14 @@ export class CdkBackendStack extends cdk.Stack {
     this.backendStackOutputs.push({ key: "translateProxyEnabled", value: String(ssmParams.translateProxyEnabled) });
     this.backendStackOutputs.push({ key: "pollyRegion", value: ssmParams.pollyRegion });
     this.backendStackOutputs.push({ key: "pollyProxyEnabled", value: String(ssmParams.pollyProxyEnabled) });
+    this.backendStackOutputs.push({ key: "transcriptApiUrl", value: transcriptStorageStack.transcriptApiUrl });
 
     new cdk.CfnOutput(this, "userPoolId", {
       value: cognitoStack.userPool.userPoolId,
+    });
+
+    new cdk.CfnOutput(this, "transcriptApiUrl", {
+      value: transcriptStorageStack.transcriptApiUrl,
     });
   }
 }

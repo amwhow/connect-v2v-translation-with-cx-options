@@ -82,6 +82,12 @@ export async function startCustomerStreamTranscription(
   if (isFunction(onPartialTranscribeEvent)) throw new Error("onPartialTranscribeEvent is required");
 
   const enablePartialResultsStabilization = TRANSCRIBE_PARTIAL_RESULTS_STABILITY.includes(partialResultStability);
+  console.info(`${LOGGER_PREFIX} - startCustomerStreamTranscription - Starting`, {
+    languageCode,
+    inputSampleRate,
+    partialResultStability,
+    enablePartialResultsStabilization,
+  });
 
   await startStreamTranscriptionWithRetry(
     {
@@ -116,6 +122,12 @@ export async function startAgentStreamTranscription(
   if (isFunction(onPartialTranscribeEvent)) throw new Error("onPartialTranscribeEvent is required");
 
   const enablePartialResultsStabilization = TRANSCRIBE_PARTIAL_RESULTS_STABILITY.includes(partialResultStability);
+  console.info(`${LOGGER_PREFIX} - startAgentStreamTranscription - Starting`, {
+    languageCode,
+    inputSampleRate,
+    partialResultStability,
+    enablePartialResultsStabilization,
+  });
 
   await startStreamTranscriptionWithRetry(
     {
@@ -162,6 +174,14 @@ async function startStreamTranscriptionWithRetry(params, options) {
     }
 
     try {
+      console.info(`${LOGGER_PREFIX} - startStreamTranscriptionWithRetry - Attempt ${attempt + 1}`, {
+        languageCode,
+        inputSampleRate,
+        resolvedSampleRate,
+        enablePartialResultsStabilization,
+        partialResultStability: enablePartialResultsStabilization ? partialResultStability : "disabled",
+        region: TRANSCRIBE_CONFIG.transcribeRegion,
+      });
       const startStreamTranscriptionCommand = new StartStreamTranscriptionCommand({
         LanguageCode: languageCode,
         MediaEncoding: "pcm",
@@ -172,7 +192,15 @@ async function startStreamTranscriptionWithRetry(params, options) {
       });
 
       const amazonTranscribeClient = await getClient();
+      console.info(`${LOGGER_PREFIX} - startStreamTranscriptionWithRetry - Transcribe client ready`, {
+        region: TRANSCRIBE_CONFIG.transcribeRegion,
+        hasCredentials: hasValidAwsCredentials(),
+      });
       const startStreamTranscriptionResponse = await amazonTranscribeClient.send(startStreamTranscriptionCommand);
+      console.info(`${LOGGER_PREFIX} - startStreamTranscriptionWithRetry - Stream started`, {
+        requestId: startStreamTranscriptionResponse?.$metadata?.requestId,
+        httpStatusCode: startStreamTranscriptionResponse?.$metadata?.httpStatusCode,
+      });
 
       let lastProcessedIndex = 0;
 
@@ -191,6 +219,17 @@ async function startStreamTranscriptionWithRetry(params, options) {
 
       return;
     } catch (error) {
+      console.error(`${LOGGER_PREFIX} - startStreamTranscriptionWithRetry - Error on attempt ${attempt + 1}`, {
+        name: error?.name,
+        message: error?.message,
+        code: error?.code,
+        requestId: error?.$metadata?.requestId,
+        httpStatusCode: error?.$metadata?.httpStatusCode,
+        region: TRANSCRIBE_CONFIG.transcribeRegion,
+        languageCode,
+        resolvedSampleRate,
+        hasCredentials: hasValidAwsCredentials(),
+      });
       if (shouldStop?.()) {
         console.info(`${LOGGER_PREFIX} - startStreamTranscriptionWithRetry - stop requested after error`);
         return;

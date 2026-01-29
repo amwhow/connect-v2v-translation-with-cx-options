@@ -27,6 +27,10 @@ export const POLLY_CONFIG = {
   pollyProxyHostname: window.location.hostname, // using Amazon Cloudfront as a proxy
 };
 
+export const TRANSCRIPT_STORAGE_CONFIG = {
+  transcriptApiUrl: getParamValue(window.WebappConfig.transcriptApiUrl),
+};
+
 function getParamValue(param) {
   const SSM_NOT_DEFINED = "not-defined";
   if (param === SSM_NOT_DEFINED) return undefined;
