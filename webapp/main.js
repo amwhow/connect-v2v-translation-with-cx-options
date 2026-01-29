@@ -22,7 +22,7 @@ import { createMicrophoneStream } from "./utils/transcribeUtils";
 import { listTranslateLanguages, translateText } from "./adapters/translateAdapter";
 import { describeVoices, listPollyEngines, listPollyLanguages, synthesizeSpeech } from "./adapters/pollyAdapter";
 import { listStreamingLanguages, startAgentStreamTranscription, startCustomerStreamTranscription } from "./adapters/transcribeAdapter";
-import { CONNECT_CONFIG } from "./config";
+import { CONNECT_CONFIG, TRANSCRIPT_STORAGE_CONFIG } from "./config";
 import { AudioContextManager } from "./managers/AudioContextManager";
 import { AudioInputTestManager } from "./managers/InputTestManager";
 import { createStatusIndicator } from "./StatusIndicator";
@@ -93,6 +93,39 @@ let ToCustomerAudioStreamManager;
 
 // AudioStreamManager to manage the stream that goes to Agent
 let ToAgentAudioStreamManager;
+
+let StatusIndicatorComponent;
+let DiagnosticsPanel;
+let TranscriptBuffer = [];
+let ActiveContactMetadata = {};
+
+const DIAGNOSTIC_FACTORS = [
+  {
+    key: "firewall",
+    label: "Enterprise Firewall",
+    detail: "WebSocket blocked? Try a personal hotspot to confirm.",
+  },
+  {
+    key: "latency",
+    label: "Latency & Region Distance",
+    detail: "High latency/jitter can delay WSS handshake.",
+  },
+  {
+    key: "browserPermissions",
+    label: "Browser Permissions",
+    detail: "Microphone access must be allowed.",
+  },
+  {
+    key: "audioStream",
+    label: "Audio Stream",
+    detail: "Check mic stream and sample rate.",
+  },
+  {
+    key: "credentials",
+    label: "Cognito Credentials",
+    detail: "Expired tokens will block Transcribe.",
+  },
+];
 
 let StatusIndicatorComponent;
 let DiagnosticsPanel;
@@ -648,6 +681,13 @@ function onContactConnected(contact) {
     console.error(`${LOGGER_PREFIX} - onContactConnected - Failed to apply language selection`, error);
   });
   updateLatencyDiagnostics();
+  ActiveContactMetadata = {
+    contactId: contact?.getContactId?.(),
+    initialContactId: contact?.getInitialContactId?.(),
+    channel: contact?.getChannel?.(),
+    customerEndpoint: contact?.getActiveInitialConnection?.()?.getEndpoint?.()?.phoneNumber,
+    connectedAt: new Date().toISOString(),
+  };
 
   CCP_V2V.UI.customerStartTranscriptionButton.disabled = false;
   CCP_V2V.UI.agentStartTranscriptionButton.disabled = false;
@@ -655,6 +695,9 @@ function onContactConnected(contact) {
 
 function onContactEnded(contact) {
   console.info(`${LOGGER_PREFIX} - contact has ended`, contact);
+  flushTranscriptBuffer(contact).catch((error) => {
+    console.error(`${LOGGER_PREFIX} - onContactEnded - Failed to store transcripts`, error);
+  });
   CurrentAgentConnectionId = null;
   StatusIndicatorComponent?.setIdle();
   DiagnosticsPanel?.setAllUnknown();
@@ -673,6 +716,8 @@ function onContactEnded(contact) {
   customerStopTranscription();
   agentStopTranscription();
   cleanUpUI();
+  TranscriptBuffer = [];
+  ActiveContactMetadata = {};
 }
 
 function onContactDestroyed(contact) {
@@ -1200,6 +1245,12 @@ async function handleCustomerTranscript(inputText) {
 
   if (!isStringUndefinedNullEmpty(translatedText)) {
     synthesizeCustomerVoice(translatedText);
+    addTranscriptToBuffer({
+      speaker: "customer",
+      originalText: inputText,
+      translatedText,
+      direction: "toAgent",
+    });
     //update CCP_V2V.UI.customerTranslatedTextOutputDiv.textContent after 100ms
     setTimeout(() => {
       CCP_V2V.UI.customerTranslatedTextOutputDiv.textContent = translatedText;
@@ -1227,6 +1278,13 @@ async function handleAgentTranslateText() {
 
   if (!isStringUndefinedNullEmpty(translatedText)) {
     synthesizeAgentVoice(translatedText);
+    addTranscriptToBuffer({
+      speaker: "agent",
+      originalText: inputText,
+      translatedText,
+      direction: "fromAgent",
+      source: "textInput",
+    });
     //update CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent after 100ms
     setTimeout(() => {
       CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent = translatedText;
@@ -1252,6 +1310,12 @@ async function handleAgentTranscript(inputText) {
 
   if (!isStringUndefinedNullEmpty(translatedText)) {
     synthesizeAgentVoice(translatedText);
+    addTranscriptToBuffer({
+      speaker: "agent",
+      originalText: inputText,
+      translatedText,
+      direction: "fromAgent",
+    });
     //update CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent after 100ms
     setTimeout(() => {
       CCP_V2V.UI.agentTranslatedTextOutputDiv.textContent = translatedText;
@@ -1639,6 +1703,64 @@ function addTranscriptCard(originalTranscript, translatedTranscript, type) {
 
   // Auto scroll to the bottom
   CCP_V2V.UI.divTranscriptContainer.scrollTop = CCP_V2V.UI.divTranscriptContainer.scrollHeight;
+}
+
+function addTranscriptToBuffer({ speaker, originalText, translatedText, direction, source } = {}) {
+  if (isStringUndefinedNullEmpty(originalText) || isStringUndefinedNullEmpty(translatedText)) return;
+  TranscriptBuffer.push({
+    speaker,
+    direction,
+    source: source ?? "speech",
+    originalText,
+    translatedText,
+    capturedAt: new Date().toISOString(),
+    language: speaker === "customer" ? CCP_V2V.UI.customerTranscribeLanguageSelect.value : CCP_V2V.UI.agentTranscribeLanguageSelect.value,
+    translateFrom: speaker === "customer" ? CCP_V2V.UI.customerTranslateFromLanguageSelect.value : CCP_V2V.UI.agentTranslateFromLanguageSelect.value,
+    translateTo: speaker === "customer" ? CCP_V2V.UI.customerTranslateToLanguageSelect.value : CCP_V2V.UI.agentTranslateToLanguageSelect.value,
+  });
+}
+
+async function flushTranscriptBuffer(contact) {
+  const apiUrl = TRANSCRIPT_STORAGE_CONFIG.transcriptApiUrl;
+  if (isStringUndefinedNullEmpty(apiUrl)) {
+    console.warn(`${LOGGER_PREFIX} - flushTranscriptBuffer - transcriptApiUrl is not configured`);
+    return;
+  }
+
+  if (!TranscriptBuffer.length) {
+    console.info(`${LOGGER_PREFIX} - flushTranscriptBuffer - No transcript entries to store`);
+    return;
+  }
+
+  const payload = {
+    contactId: contact?.getContactId?.(),
+    initialContactId: contact?.getInitialContactId?.(),
+    channel: contact?.getChannel?.(),
+    connectedAt: ActiveContactMetadata.connectedAt,
+    endedAt: new Date().toISOString(),
+    customerEndpoint: ActiveContactMetadata.customerEndpoint,
+    agentUsername: CurrentUser.currentUser_ConnectUsername,
+    transcripts: TranscriptBuffer,
+  };
+
+  console.info(`${LOGGER_PREFIX} - flushTranscriptBuffer - Sending transcript payload`, {
+    transcriptCount: TranscriptBuffer.length,
+    contactId: payload.contactId,
+    apiUrl,
+  });
+
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const responseText = await response.text().catch(() => "");
+    throw new Error(`Transcript upload failed (${response.status}): ${responseText}`);
+  }
 }
 
 function getAutoSelectedSampleRate(inputSampleRate) {
