@@ -175,6 +175,8 @@ If you want to persist transcripts without modifying the CDK stacks, you can cre
    - Update the deployed `frontend-config.js` (in your webapp S3 bucket) to include:
      `window.WebappConfig.transcriptApiUrl = "https://<api-id>.execute-api.<region>.amazonaws.com/transcripts";`
    - The frontend reads this value as `TRANSCRIPT_STORAGE_CONFIG.transcriptApiUrl` and uses it when flushing buffered transcripts on contact end.
+   - To avoid manual edits after each CDK deploy, run:
+     `npm run set:transcript-api -- https://<api-id>.execute-api.<region>.amazonaws.com/transcripts`
 
 ## Clean up
 

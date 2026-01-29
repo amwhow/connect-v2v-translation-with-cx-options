@@ -22,6 +22,7 @@
     "echo:cdk-frontend-stack-physical-name": "aws ssm get-parameter --query 'Parameter'.'Value' --name $(npm run --silent echo:cdk-frontend-stack-name-param) --output text",
     "echo:web-app-bucket": "aws cloudformation describe-stacks --stack-name $(npm run --silent echo:cdk-frontend-stack-physical-name) --query 'Stacks[0].Outputs[?OutputKey==`webAppBucket`].OutputValue' --output text",
     "sync-config": "aws s3 cp s3://$(npm run --silent echo:web-app-bucket)/$(npm run --silent echo:web-app-root-prefix)frontend-config.js ../webapp/",
+    "set:transcript-api": "./scripts/update-transcript-api.sh",
     "build:webapp": "cd ../webapp && npm run-script build",
     "build:webapp:gitbash": "cd ../webapp && npm run-script build:gitbash",
     "cdk:remove:context": "rm -f cdk.context.json",
