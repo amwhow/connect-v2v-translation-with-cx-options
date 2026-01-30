@@ -99,6 +99,8 @@ let DiagnosticsPanel;
 
 let TranscriptBuffer = [];
 let ActiveContactMetadata = {};
+let CustomerAudioElementSource = null;
+let CustomerAudioElementDestination = null;
 
 const DIAGNOSTIC_FACTORS = [
   {
@@ -619,11 +621,13 @@ function getCustomerAudioStreamCandidates() {
   const uiAudioElement = CCP_V2V.UI?.fromCustomerAudioElement;
   const uiAudioElementStream = uiAudioElement?.srcObject;
   const uiAudioElementCaptureStream = getAudioElementCaptureStream(uiAudioElement);
+  const uiAudioElementDestinationStream = CustomerAudioElementDestination?.stream;
   return [
     { label: "session._remoteAudioStream", stream: sessionAudioStream },
     { label: "session._remoteAudioElement.srcObject", stream: sessionAudioElementStream },
     { label: "fromCustomerAudioElement.srcObject", stream: uiAudioElementStream },
     { label: "fromCustomerAudioElement.captureStream()", stream: uiAudioElementCaptureStream },
+    { label: "fromCustomerAudioElement.mediaStreamDestination", stream: uiAudioElementDestinationStream },
   ];
 }
 
@@ -643,6 +647,52 @@ function getAudioElementCaptureStream(audioElement) {
   }
 }
 
+async function getAudioElementDestinationStream(audioElement) {
+  if (!audioElement) {
+    return null;
+  }
+  if (CustomerAudioElementDestination?.stream) {
+    return CustomerAudioElementDestination.stream;
+  }
+
+  try {
+    const audioContext = await getAudioContext();
+    if (!CustomerAudioElementSource) {
+      CustomerAudioElementSource = audioContext.createMediaElementSource(audioElement);
+    }
+    CustomerAudioElementDestination = audioContext.createMediaStreamDestination();
+    CustomerAudioElementSource.connect(CustomerAudioElementDestination);
+    CustomerAudioElementSource.connect(audioContext.destination);
+    return CustomerAudioElementDestination.stream;
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - getAudioElementDestinationStream - Failed to create destination stream`, error);
+    return null;
+  }
+}
+
+async function hydrateCustomerAudioElementStream() {
+  const audioElement = CCP_V2V.UI?.fromCustomerAudioElement;
+  if (!audioElement) {
+    return;
+  }
+
+  if (audioElement.readyState < 2) {
+    await new Promise((resolve) => {
+      const timeout = setTimeout(resolve, 1500);
+      const handleReady = () => {
+        clearTimeout(timeout);
+        audioElement.removeEventListener("canplay", handleReady);
+        audioElement.removeEventListener("playing", handleReady);
+        resolve();
+      };
+      audioElement.addEventListener("canplay", handleReady, { once: true });
+      audioElement.addEventListener("playing", handleReady, { once: true });
+    });
+  }
+
+  await getAudioElementDestinationStream(audioElement);
+}
+
 function resolveCustomerAudioStream() {
   const candidates = getCustomerAudioStreamCandidates();
   const match = candidates.find(({ stream }) => stream?.getAudioTracks?.().length);
@@ -653,6 +703,7 @@ async function waitForCustomerAudioStream({ timeoutMs = 5000, pollIntervalMs = 2
   const start = Date.now();
   let resolvedStream = resolveCustomerAudioStream();
   while (!resolvedStream && Date.now() - start < timeoutMs) {
+    await hydrateCustomerAudioElementStream();
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     resolvedStream = resolveCustomerAudioStream();
   }
