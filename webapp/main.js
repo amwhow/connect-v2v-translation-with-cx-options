@@ -1098,9 +1098,11 @@ async function customerStartTranscription() {
     if (CCP_V2V.UI.customerStreamMicCheckbox.checked === true) {
       //we want agent to hear the customer's original voice, so we reduce the fromCustomerAudioElement volume
       CCP_V2V.UI.fromCustomerAudioElement.volume = 0.3;
+      CCP_V2V.UI.fromCustomerAudioElement.muted = false;
     } else {
-      //we don't want agent to hear the customer's original voice, so we mute the fromCustomerAudioElement
-      CCP_V2V.UI.fromCustomerAudioElement.muted = true;
+      //we don't want agent to hear the customer's original voice, so we set volume to 0 (avoid muting captureStream)
+      CCP_V2V.UI.fromCustomerAudioElement.volume = 0;
+      CCP_V2V.UI.fromCustomerAudioElement.muted = false;
     }
 
     //Play the audio feedback to customer
