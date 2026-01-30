@@ -97,6 +97,9 @@ let ToAgentAudioStreamManager;
 let StatusIndicatorComponent;
 let DiagnosticsPanel;
 
+let TranscriptBuffer = [];
+let ActiveContactMetadata = {};
+
 const DIAGNOSTIC_FACTORS = [
   {
     key: "firewall",
@@ -1305,9 +1308,9 @@ function loadPollyLanguageCodes() {
   CCP_V2V.UI.agentPollyLanguageCodeSelect.value = "en-US";
 
   //pre-select saved pollyLanguageCode
-  const savedCUstomerPollyLanguageCode = getLocalStorageValueByKey("customerPollyLanguageCode");
-  if (savedCUstomerPollyLanguageCode) {
-    CCP_V2V.UI.customerPollyLanguageCodeSelect.value = savedCUstomerPollyLanguageCode;
+  const savedCustomerPollyLanguageCode = getLocalStorageValueByKey("customerPollyLanguageCode");
+  if (savedCustomerPollyLanguageCode) {
+    CCP_V2V.UI.customerPollyLanguageCodeSelect.value = savedCustomerPollyLanguageCode;
   }
 
   const savedAgentPollyLanguageCode = getLocalStorageValueByKey("agentPollyLanguageCode");
@@ -1672,21 +1675,6 @@ function addTranscriptCard(originalTranscript, translatedTranscript, type) {
   CCP_V2V.UI.divTranscriptContainer.scrollTop = CCP_V2V.UI.divTranscriptContainer.scrollHeight;
 }
 
-function addTranscriptToBuffer({ speaker, originalText, translatedText, direction, source } = {}) {
-  if (isStringUndefinedNullEmpty(originalText) || isStringUndefinedNullEmpty(translatedText)) return;
-  TranscriptBuffer.push({
-    speaker,
-    direction,
-    source: source ?? "speech",
-    originalText,
-    translatedText,
-    capturedAt: new Date().toISOString(),
-    language: speaker === "customer" ? CCP_V2V.UI.customerTranscribeLanguageSelect.value : CCP_V2V.UI.agentTranscribeLanguageSelect.value,
-    translateFrom: speaker === "customer" ? CCP_V2V.UI.customerTranslateFromLanguageSelect.value : CCP_V2V.UI.agentTranslateFromLanguageSelect.value,
-    translateTo: speaker === "customer" ? CCP_V2V.UI.customerTranslateToLanguageSelect.value : CCP_V2V.UI.agentTranslateToLanguageSelect.value,
-  });
-}
-
 async function flushTranscriptBuffer(contact) {
   const apiUrl = TRANSCRIPT_STORAGE_CONFIG.transcriptApiUrl;
   if (isStringUndefinedNullEmpty(apiUrl)) {
@@ -1743,49 +1731,6 @@ function addTranscriptToBuffer({ speaker, originalText, translatedText, directio
     translateFrom: speaker === "customer" ? CCP_V2V.UI.customerTranslateFromLanguageSelect.value : CCP_V2V.UI.agentTranslateFromLanguageSelect.value,
     translateTo: speaker === "customer" ? CCP_V2V.UI.customerTranslateToLanguageSelect.value : CCP_V2V.UI.agentTranslateToLanguageSelect.value,
   });
-}
-
-async function flushTranscriptBuffer(contact) {
-  const apiUrl = TRANSCRIPT_STORAGE_CONFIG.transcriptApiUrl;
-  if (isStringUndefinedNullEmpty(apiUrl)) {
-    console.warn(`${LOGGER_PREFIX} - flushTranscriptBuffer - transcriptApiUrl is not configured`);
-    return;
-  }
-
-  if (!TranscriptBuffer.length) {
-    console.info(`${LOGGER_PREFIX} - flushTranscriptBuffer - No transcript entries to store`);
-    return;
-  }
-
-  const payload = {
-    contactId: contact?.getContactId?.(),
-    initialContactId: contact?.getInitialContactId?.(),
-    channel: contact?.getChannel?.(),
-    connectedAt: ActiveContactMetadata.connectedAt,
-    endedAt: new Date().toISOString(),
-    customerEndpoint: ActiveContactMetadata.customerEndpoint,
-    agentUsername: CurrentUser.currentUser_ConnectUsername,
-    transcripts: TranscriptBuffer,
-  };
-
-  console.info(`${LOGGER_PREFIX} - flushTranscriptBuffer - Sending transcript payload`, {
-    transcriptCount: TranscriptBuffer.length,
-    contactId: payload.contactId,
-    apiUrl,
-  });
-
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const responseText = await response.text().catch(() => "");
-    throw new Error(`Transcript upload failed (${response.status}): ${responseText}`);
-  }
 }
 
 function getAutoSelectedSampleRate(inputSampleRate) {
