@@ -126,6 +126,11 @@ const DIAGNOSTIC_FACTORS = [
     label: "Cognito Credentials",
     detail: "Expired tokens will block Transcribe.",
   },
+  {
+    key: "transcriptStorage",
+    label: "Transcript Storage",
+    detail: "Checks whether transcripts were uploaded successfully.",
+  },
 ];
 
 async function getAudioContext() {
@@ -592,6 +597,46 @@ async function waitForSelectOptions(selectElement, timeoutMs = 4000) {
   }
 }
 
+function getCustomerAudioStreamCandidates() {
+  const session = ConnectSoftPhoneManager?.getSession(CurrentAgentConnectionId);
+  const sessionAudioStream = session?._remoteAudioStream;
+  const sessionAudioElementStream = session?._remoteAudioElement?.srcObject;
+  const uiAudioElementStream = CCP_V2V.UI?.fromCustomerAudioElement?.srcObject;
+  return [
+    { label: "session._remoteAudioStream", stream: sessionAudioStream },
+    { label: "session._remoteAudioElement.srcObject", stream: sessionAudioElementStream },
+    { label: "fromCustomerAudioElement.srcObject", stream: uiAudioElementStream },
+  ];
+}
+
+function resolveCustomerAudioStream() {
+  const candidates = getCustomerAudioStreamCandidates();
+  const match = candidates.find(({ stream }) => stream?.getAudioTracks?.().length);
+  return match?.stream ?? null;
+}
+
+async function waitForCustomerAudioStream({ timeoutMs = 5000, pollIntervalMs = 200 } = {}) {
+  const start = Date.now();
+  let resolvedStream = resolveCustomerAudioStream();
+  while (!resolvedStream && Date.now() - start < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    resolvedStream = resolveCustomerAudioStream();
+  }
+  return resolvedStream;
+}
+
+function refreshRTCSessionTrackManager() {
+  const session = ConnectSoftPhoneManager?.getSession(CurrentAgentConnectionId);
+  const peerConnection = session?._pc;
+  if (!peerConnection) {
+    return null;
+  }
+  if (!RTCSessionTrackManager || RTCSessionTrackManager.peerConnection !== peerConnection) {
+    replaceRTCSessionTrackManager(peerConnection);
+  }
+  return peerConnection;
+}
+
 async function applyLanguageSelectionForContact(contact) {
   const rawLanguageValue = getContactAttributeValue(contact, CONNECT_LANGUAGE_ATTRIBUTE_KEY);
   const resolvedLanguageKey = resolveLanguageAttributeValue(rawLanguageValue);
@@ -659,6 +704,7 @@ function onContactConnected(contact) {
     connectedAt: new Date().toISOString(),
   };
 
+  setDiagnosticStatus("transcriptStorage", "unknown", "Waiting to upload transcripts on call end.");
   CCP_V2V.UI.customerStartTranscriptionButton.disabled = false;
   CCP_V2V.UI.agentStartTranscriptionButton.disabled = false;
 }
@@ -667,6 +713,7 @@ function onContactEnded(contact) {
   console.info(`${LOGGER_PREFIX} - contact has ended`, contact);
   flushTranscriptBuffer(contact).catch((error) => {
     console.error(`${LOGGER_PREFIX} - onContactEnded - Failed to store transcripts`, error);
+    setDiagnosticStatus("transcriptStorage", "error", "Transcript upload failed. See console logs.");
   });
   CurrentAgentConnectionId = null;
   StatusIndicatorComponent?.setIdle();
@@ -941,10 +988,14 @@ function loadTranscribePartialResultsStability() {
 
 //Creates Customer Speaker Stream used as input for Amazon Transcribe when transcribing customer's voice
 async function captureFromCustomerAudioStream() {
-  const session = ConnectSoftPhoneManager?.getSession(CurrentAgentConnectionId);
-  const audioStream = session?._remoteAudioStream;
+  const audioStream = await waitForCustomerAudioStream();
   if (audioStream == null) {
-    console.error(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - No audio stream found from customer`);
+    const candidates = getCustomerAudioStreamCandidates().map(({ label, stream }) => ({
+      label,
+      hasStream: Boolean(stream),
+      hasAudioTracks: Boolean(stream?.getAudioTracks?.().length),
+    }));
+    console.error(`${LOGGER_PREFIX} - captureFromCustomerAudioStream - No audio stream found from customer`, candidates);
     setDiagnosticStatus("audioStream", "error", "Customer audio stream unavailable from Connect.");
     throw new Error("No audio stream found from customer, please check you browser sound settings");
   }
@@ -974,7 +1025,11 @@ async function customerStartTranscription() {
 
     //Get ready to stream To Customer
     const toCustomerAudioTrack = ToCustomerAudioStreamManager.getAudioTrack();
-    RTCSessionTrackManager.replaceTrack(toCustomerAudioTrack, TrackType.POLLY);
+    if (refreshRTCSessionTrackManager()) {
+      RTCSessionTrackManager.replaceTrack(toCustomerAudioTrack, TrackType.POLLY);
+    } else {
+      console.warn(`${LOGGER_PREFIX} - customerStartTranscription - peerConnection unavailable; skipping track replacement`);
+    }
 
     //getting the remote audio stream from the current RTC session into AmazonTranscribeFromCustomerAudioStream variable
     AmazonTranscribeFromCustomerAudioStream = await captureFromCustomerAudioStream();
@@ -1051,7 +1106,11 @@ async function agentStartTranscription() {
 
     //Get ready to stream To Customer
     const toCustomerAudioTrack = ToCustomerAudioStreamManager.getAudioTrack();
-    RTCSessionTrackManager.replaceTrack(toCustomerAudioTrack, TrackType.POLLY);
+    if (refreshRTCSessionTrackManager()) {
+      RTCSessionTrackManager.replaceTrack(toCustomerAudioTrack, TrackType.POLLY);
+    } else {
+      console.warn(`${LOGGER_PREFIX} - agentStartTranscription - peerConnection unavailable; skipping track replacement`);
+    }
 
     if (CCP_V2V.UI.agentStreamMicCheckbox.checked === true) {
       await ToCustomerAudioStreamManager.startMicrophone(micConstraints);
@@ -1679,11 +1738,13 @@ async function flushTranscriptBuffer(contact) {
   const apiUrl = TRANSCRIPT_STORAGE_CONFIG.transcriptApiUrl;
   if (isStringUndefinedNullEmpty(apiUrl)) {
     console.warn(`${LOGGER_PREFIX} - flushTranscriptBuffer - transcriptApiUrl is not configured`);
+    setDiagnosticStatus("transcriptStorage", "warning", "Transcript API URL not configured.");
     return;
   }
 
   if (!TranscriptBuffer.length) {
     console.info(`${LOGGER_PREFIX} - flushTranscriptBuffer - No transcript entries to store`);
+    setDiagnosticStatus("transcriptStorage", "warning", "No transcript entries captured.");
     return;
   }
 
@@ -1704,6 +1765,8 @@ async function flushTranscriptBuffer(contact) {
     apiUrl,
   });
 
+  setDiagnosticStatus("transcriptStorage", "warning", `Uploading ${TranscriptBuffer.length} transcript entries...`);
+
   const response = await fetch(apiUrl, {
     method: "POST",
     headers: {
@@ -1714,8 +1777,13 @@ async function flushTranscriptBuffer(contact) {
 
   if (!response.ok) {
     const responseText = await response.text().catch(() => "");
+    setDiagnosticStatus("transcriptStorage", "error", `Upload failed (${response.status}).`);
     throw new Error(`Transcript upload failed (${response.status}): ${responseText}`);
   }
+
+  const responseBody = await response.json().catch(() => ({}));
+  setDiagnosticStatus("transcriptStorage", "ok", "Transcript upload successful.");
+  console.info(`${LOGGER_PREFIX} - flushTranscriptBuffer - Transcript upload complete`, responseBody);
 }
 
 function addTranscriptToBuffer({ speaker, originalText, translatedText, direction, source } = {}) {
