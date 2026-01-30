@@ -450,17 +450,32 @@ const initCCP = async (onConnectInitialized) => {
 
 const onConnectInitialized = (connectAgent) => {
   connect = window.connect;
+  console.info(`${LOGGER_PREFIX} - onConnectInitialized - Initializing softphone manager`);
   connect.core.initSoftphoneManager({ allowFramedSoftphone: true });
+  console.info(`${LOGGER_PREFIX} - onConnectInitialized - Softphone manager initialized`);
 
   const connectAgentConfiguration = connectAgent.getConfiguration();
   CurrentUser["currentUser_ConnectUsername"] = connectAgentConfiguration.username;
+  console.info(`${LOGGER_PREFIX} - onConnectInitialized - Agent configuration loaded`, {
+    username: CurrentUser.currentUser_ConnectUsername,
+  });
 
+  console.info(`${LOGGER_PREFIX} - onConnectInitialized - Subscribing to agent/contact events`);
   subscribeToAgentEvents();
   subscribeToContactEvents();
+  console.info(`${LOGGER_PREFIX} - onConnectInitialized - Subscriptions complete`);
 
   connect.core.onSoftphoneSessionInit(function ({ connectionId }) {
+    console.info(`${LOGGER_PREFIX} - onSoftphoneSessionInit - Session initializing`, { connectionId });
     ConnectSoftPhoneManager = connect.core.getSoftphoneManager();
-    //console.info(`${LOGGER_PREFIX} - softphoneManager`, softphoneManager);
+    const session = ConnectSoftPhoneManager?.getSession?.(connectionId);
+    console.info(`${LOGGER_PREFIX} - onSoftphoneSessionInit - Softphone manager ready`, {
+      hasManager: Boolean(ConnectSoftPhoneManager),
+      sessionFound: Boolean(session),
+      hasPeerConnection: Boolean(session?._pc),
+      hasRemoteStream: Boolean(session?._remoteAudioStream),
+      hasRemoteAudioElement: Boolean(session?._remoteAudioElement),
+    });
   });
 };
 
@@ -601,12 +616,31 @@ function getCustomerAudioStreamCandidates() {
   const session = ConnectSoftPhoneManager?.getSession(CurrentAgentConnectionId);
   const sessionAudioStream = session?._remoteAudioStream;
   const sessionAudioElementStream = session?._remoteAudioElement?.srcObject;
-  const uiAudioElementStream = CCP_V2V.UI?.fromCustomerAudioElement?.srcObject;
+  const uiAudioElement = CCP_V2V.UI?.fromCustomerAudioElement;
+  const uiAudioElementStream = uiAudioElement?.srcObject;
+  const uiAudioElementCaptureStream = getAudioElementCaptureStream(uiAudioElement);
   return [
     { label: "session._remoteAudioStream", stream: sessionAudioStream },
     { label: "session._remoteAudioElement.srcObject", stream: sessionAudioElementStream },
     { label: "fromCustomerAudioElement.srcObject", stream: uiAudioElementStream },
+    { label: "fromCustomerAudioElement.captureStream()", stream: uiAudioElementCaptureStream },
   ];
+}
+
+function getAudioElementCaptureStream(audioElement) {
+  if (!audioElement) {
+    return null;
+  }
+  const captureFn = audioElement.captureStream || audioElement.mozCaptureStream;
+  if (!captureFn) {
+    return null;
+  }
+  try {
+    return captureFn.call(audioElement);
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - getAudioElementCaptureStream - Failed to capture audio element stream`, error);
+    return null;
+  }
 }
 
 function resolveCustomerAudioStream() {
