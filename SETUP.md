@@ -21,7 +21,7 @@ On a high-level, the solution consists of the following components, each contain
 ## Solution prerequisites
 
 - AWS Account
-- [AWS IAM user](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_users_create.html) with Administrator permissions
+- [AWS IAM user](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_users_create.html) with Administrator permissions (or the scoped permissions listed in [Required AWS permissions](#required-aws-permissions))
 - Amazon Connect instance
 - [Node](https://nodejs.org/) (v20) and [NPM](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) (v10) installed and configured on your computer
 - [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html) (v2) installed and configured on your computer
@@ -139,6 +139,8 @@ To be able to make changes in the Webapp and test them locally, without re-deplo
 8. You can make changes and customize Webapp files, with browser automatically reloading the Webapp
 9. Please make sure you add `https://localhost:5173` as Amazon Connect Approved Origin (see Step 6 in **Solution setup** -> **Configure Amazon Connect Approved Origins**)
 10. Once happy with the changes, navigate to `connect-v2v-translation-with-cx-options/cdk-stacks` and `npm run build:deploy:all` (On Windows devices use `npm run build:deploy:all:gitbash`)
+11. After the deploy completes, update the transcript API URL in the hosted config:
+    - `npm run set:transcript-api -- https://<api-id>.execute-api.<region>.amazonaws.com/transcripts`
 
 ## Transcript storage (manual AWS console setup)
 
@@ -177,6 +179,43 @@ If you want to persist transcripts without modifying the CDK stacks, you can cre
    - The frontend reads this value as `TRANSCRIPT_STORAGE_CONFIG.transcriptApiUrl` and uses it when flushing buffered transcripts on contact end.
    - To avoid manual edits after each CDK deploy, run:
      `npm run set:transcript-api -- https://<api-id>.execute-api.<region>.amazonaws.com/transcripts`
+
+## Production deployment checklist (additional steps)
+
+Use these steps in addition to the **Solution setup** section when you want to deploy for production usage.
+
+1. **Create transcript storage resources (required for production audit/retention)**
+   - Follow the **Transcript storage (manual AWS console setup)** section to create the S3 bucket, Lambda function, and API Gateway HTTP API.
+   - Record the API invoke URL (for example: `https://<api-id>.execute-api.<region>.amazonaws.com/transcripts`).
+
+2. **Deploy the solution**
+   - From `connect-v2v-translation-with-cx-options/cdk-stacks`, run `npm run build:deploy:all` (or `npm run build:deploy:all:gitbash` on Windows).
+   - Wait for the CloudFormation stacks to complete.
+
+3. **Set the transcript API URL (after every deploy)**
+   - Run the command below to update the hosted `frontend-config.js` in the webapp S3 bucket:
+     `npm run set:transcript-api -- https://<api-id>.execute-api.<region>.amazonaws.com/transcripts`
+   - This keeps the production frontend pointing at the correct transcript ingestion endpoint.
+
+4. **Validate production access**
+   - Confirm the CloudFront URL is listed in Amazon Connect **Approved origins** (see Step 6 in **Solution setup**).
+   - Log in to the production URL and verify that Diagnostics shows **Transcript Storage** status updates on call end.
+
+## Required AWS permissions
+
+If you cannot use `AdministratorAccess`, request a role or policy that allows the following actions for deployment and transcript storage:
+
+- **AWS CDK / CloudFormation:** create/update/delete stacks, change sets, and stack resources (`cloudformation:*`).
+- **IAM:** create and manage roles/policies for Lambda, CloudFront, and Cognito (`iam:CreateRole`, `iam:AttachRolePolicy`, `iam:PassRole`, `iam:PutRolePolicy`).
+- **Amazon S3:** create buckets and upload web assets (`s3:CreateBucket`, `s3:PutObject`, `s3:GetObject`, `s3:ListBucket`).
+- **CloudFront:** create distributions and invalidate cache (`cloudfront:CreateDistribution`, `cloudfront:UpdateDistribution`, `cloudfront:CreateInvalidation`).
+- **Amazon Cognito:** manage User Pools, clients, and domains (`cognito-idp:*`).
+- **AWS Lambda:** create/update functions and permissions (`lambda:*`).
+- **Amazon API Gateway (HTTP API):** create APIs, routes, integrations, and stages (`apigateway:*`).
+- **AWS Systems Manager (Parameter Store):** read/write deployment parameters (`ssm:GetParameter`, `ssm:PutParameter`).
+- **Amazon CloudWatch Logs:** create log groups/streams for Lambda (`logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents`).
+- **Amazon Connect:** update Approved Origins in your instance (`connect:UpdateInstanceAttribute`, `connect:DescribeInstance`).
+- **Optional (if you use SSE-KMS for transcripts):** `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKey` on the selected KMS key.
 
 ## Clean up
 

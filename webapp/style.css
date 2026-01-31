@@ -32,11 +32,36 @@ header {
   margin-bottom: 10px;
 }
 
-#diagnosticsSection h2 {
-  border-bottom: none;
-  margin: 0 0 6px;
+.collapsible-panel details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.collapsible-panel summary {
+  list-style: none;
+  cursor: pointer;
   font-size: 1.1em;
+  font-weight: bold;
   color: #0f172a;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.collapsible-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible-panel summary::before {
+  content: "▸";
+  font-size: 1em;
+  color: #2563eb;
+  transition: transform 0.2s ease;
+}
+
+.collapsible-panel details[open] summary::before {
+  transform: rotate(90deg);
 }
 
 .diagnostic-panel {
@@ -298,13 +323,59 @@ button:disabled {
 }
 
 #transcribeTranslate {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr) minmax(360px, 1.2fr);
+  grid-template-areas:
+    "customer agent transcription"
+    "callattrs callattrs transcription";
+  gap: 10px;
+  align-items: start;
 }
 
-#transcribeTranslate > div {
-  flex-basis: calc(33% - 10px);
+#divCustomerControls {
+  grid-area: customer;
+}
+
+#divAgentControls {
+  grid-area: agent;
+}
+
+#divCallAttributes {
+  grid-area: callattrs;
+}
+
+#divTranscription {
+  grid-area: transcription;
+}
+
+.call-attributes-card {
+  min-height: auto;
+}
+
+.call-attributes-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.call-attributes-table th,
+.call-attributes-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.call-attributes-table th {
+  font-weight: bold;
+  color: #0f172a;
+  background-color: #f8fafc;
+}
+
+.call-attributes-empty {
+  text-align: center;
+  color: #64748b;
+  font-style: italic;
+  padding: 12px 8px;
 }
 
 #audioPlayback {
@@ -378,8 +449,13 @@ button:disabled {
       padding: 0;
   }
 
-  #transcribeTranslate > div {
-      flex-basis: 100%;
+  #transcribeTranslate {
+      grid-template-columns: 1fr;
+      grid-template-areas:
+        "customer"
+        "agent"
+        "callattrs"
+        "transcription";
   }
 }
 
