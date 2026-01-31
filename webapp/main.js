@@ -99,6 +99,7 @@ let DiagnosticsPanel;
 
 let TranscriptBuffer = [];
 let ActiveContactMetadata = {};
+let ActiveContactAttributes = {};
 let CustomerAudioElementSource = null;
 let CustomerAudioElementDestination = null;
 
@@ -312,6 +313,7 @@ const bindUIElements = () => {
 
     //Transcript UI Elements
     divTranscriptContainer: document.getElementById("divTranscriptContainer"),
+    callAttributesTableBody: document.getElementById("callAttributesTableBody"),
   };
 };
 
@@ -572,6 +574,65 @@ function getLanguageDisplayLabel(languageKey) {
   }
 }
 
+function resolveAttributeValue(attributeValue) {
+  if (attributeValue == null) {
+    return "";
+  }
+
+  if (typeof attributeValue === "string") {
+    return attributeValue;
+  }
+
+  if (attributeValue?.value != null) {
+    return attributeValue.value;
+  }
+
+  if (attributeValue?.Value != null) {
+    return attributeValue.Value;
+  }
+
+  try {
+    return JSON.stringify(attributeValue);
+  } catch (error) {
+    console.warn(`${LOGGER_PREFIX} - resolveAttributeValue - Unable to stringify attribute value`, error);
+    return String(attributeValue);
+  }
+}
+
+function updateCallAttributesTable(attributes = {}) {
+  const tableBody = CCP_V2V.UI?.callAttributesTableBody;
+  if (!tableBody) return;
+
+  tableBody.innerHTML = "";
+  const attributeEntries = Object.entries(attributes);
+
+  if (attributeEntries.length === 0) {
+    const emptyRow = document.createElement("tr");
+    const emptyCell = document.createElement("td");
+    emptyCell.colSpan = 2;
+    emptyCell.className = "call-attributes-empty";
+    emptyCell.textContent = "No call attributes available yet.";
+    emptyRow.appendChild(emptyCell);
+    tableBody.appendChild(emptyRow);
+    return;
+  }
+
+  attributeEntries
+    .sort(([firstKey], [secondKey]) => firstKey.localeCompare(secondKey))
+    .forEach(([key, value]) => {
+      const row = document.createElement("tr");
+      const nameCell = document.createElement("td");
+      nameCell.textContent = key;
+
+      const valueCell = document.createElement("td");
+      valueCell.textContent = resolveAttributeValue(value) || "—";
+
+      row.appendChild(nameCell);
+      row.appendChild(valueCell);
+      tableBody.appendChild(row);
+    });
+}
+
 function setSelectValueIfAvailable(selectElement, value) {
   if (!selectElement || isStringUndefinedNullEmpty(value)) return false;
   const matchingOption = Array.from(selectElement.options).find((option) => option.value === value);
@@ -772,6 +833,8 @@ async function applyLanguageSelectionForContact(contact) {
 function onContactConnecting(contact) {
   console.info(`${LOGGER_PREFIX} - contact is connecting`, contact);
   StatusIndicatorComponent?.setDetecting();
+  ActiveContactAttributes = contact?.getAttributes?.() ?? {};
+  updateCallAttributesTable(ActiveContactAttributes);
 }
 
 function onContactConnected(contact) {
@@ -788,6 +851,8 @@ function onContactConnected(contact) {
     customerEndpoint: contact?.getActiveInitialConnection?.()?.getEndpoint?.()?.phoneNumber,
     connectedAt: new Date().toISOString(),
   };
+  ActiveContactAttributes = contact?.getAttributes?.() ?? {};
+  updateCallAttributesTable(ActiveContactAttributes);
 
   setDiagnosticStatus("transcriptStorage", "unknown", "Waiting to upload transcripts on call end.");
   CCP_V2V.UI.customerStartTranscriptionButton.disabled = false;
@@ -820,6 +885,7 @@ function onContactEnded(contact) {
   cleanUpUI();
   TranscriptBuffer = [];
   ActiveContactMetadata = {};
+  ActiveContactAttributes = {};
 }
 
 function onContactDestroyed(contact) {
@@ -1623,6 +1689,7 @@ function cleanUpUI() {
   CCP_V2V.UI.agentStartTranscriptionButton.disabled = true;
 
   enableMicrophoneAndSpeakerSelection();
+  updateCallAttributesTable();
 }
 
 function raiseError(errorMessage) {
