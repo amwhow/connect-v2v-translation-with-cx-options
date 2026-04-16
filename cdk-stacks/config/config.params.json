@@ -72,6 +72,25 @@
       "defaultValue": true,
       "required": true,
       "boolean": true
+    },
+    {
+      "name": "samlProviderName",
+      "cliFormat": "saml-provider-name",
+      "description": "A friendly name for the SAML Identity Provider (e.g., AzureAD, Okta). This is used as the identity_provider parameter in the Cognito OAuth authorize URL.",
+      "required": true
+    },
+    {
+      "name": "samlMetadataURL",
+      "cliFormat": "saml-metadata-url",
+      "description": "The SAML Identity Provider federation metadata URL. For Azure AD/Entra ID, this is the App Federation Metadata Url found in the SAML Certificates section of the Enterprise Application.",
+      "required": true
+    },
+    {
+      "name": "samlSignInType",
+      "cliFormat": "saml-sign-in-type",
+      "description": "Controls whether Cognito native login is available alongside SAML. Set to SAML_ONLY to disable Cognito email/password login, or SAML_AND_COGNITO to keep both options.",
+      "defaultValue": "SAML_ONLY",
+      "required": true
     }
   ]
 }
