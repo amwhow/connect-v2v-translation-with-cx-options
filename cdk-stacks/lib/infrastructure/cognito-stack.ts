@@ -49,14 +49,30 @@ export class CognitoStack extends cdk.NestedStack {
       },
     });
 
-    //SAML Federation
+    //SAML Federation - Add SAML Identity Provider (e.g., Azure AD / Entra ID)
+    const samlProvider = new cognito.UserPoolIdentityProviderSaml(this, "SAMLProvider", {
+      userPool: userPool,
+      name: props.SSMParams.samlProviderName,
+      metadata: cognito.UserPoolIdentityProviderSamlMetadata.url(props.SSMParams.samlMetadataURL),
+      idpSignout: true,
+      attributeMapping: {
+        email: cognito.ProviderAttribute.other("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"),
+      },
+    });
+
+    //Configure supported identity providers based on samlSignInType
     let supportedIdentityProviders: cognito.UserPoolClientIdentityProvider[] = [];
     let userPoolClientOAuthConfig: cognito.OAuthSettings = {
       scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID, cognito.OAuthScope.COGNITO_ADMIN, cognito.OAuthScope.PROFILE],
     };
 
-    //Enable Cognito Managed Login Pages
-    supportedIdentityProviders.push(cognito.UserPoolClientIdentityProvider.COGNITO);
+    //Add SAML provider
+    supportedIdentityProviders.push(cognito.UserPoolClientIdentityProvider.custom(props.SSMParams.samlProviderName));
+
+    //Optionally keep Cognito Managed Login Pages alongside SAML
+    if (props.SSMParams.samlSignInType === "SAML_AND_COGNITO") {
+      supportedIdentityProviders.push(cognito.UserPoolClientIdentityProvider.COGNITO);
+    }
 
     //create a User Pool Client
     const userPoolClient = new cognito.UserPoolClient(this, "UserPoolClient", {
@@ -70,6 +86,9 @@ export class CognitoStack extends cdk.NestedStack {
         logoutUrls: props.SSMParams.cognitoLogoutUrls.split(",").map((item: string) => item.trim()),
       },
     });
+
+    //Ensure SAML provider is created before the User Pool Client references it
+    userPoolClient.node.addDependency(samlProvider);
 
     const userPoolDomain = new cognito.CfnUserPoolDomain(this, "UserPoolDomain", {
       domain: props.SSMParams.cognitoDomainPrefix,

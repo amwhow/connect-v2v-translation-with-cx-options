@@ -3,28 +3,40 @@
 import { COGNITO_CONFIG, CONNECT_AUTH_CONFIG } from "../config";
 import { LOGGER_PREFIX } from "../constants";
 
+// In-memory token store — not accessible via window/document/localStorage,
+// eliminating XSS risk for OAuth tokens. On page reload, tokens are lost and
+// the user is seamlessly re-authenticated via the SAML IdP session.
+const tokenStore = {
+  accessToken: null,
+  idToken: null,
+  refreshToken: null,
+};
+
 export function setRedirectURI(redirectURI) {
   const currentUrl = redirectURI ?? window.location.href;
   const url = new URL(currentUrl);
   const redirectUri = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
-  //set redirect uri in local storage
-  localStorage.setItem("redirectUri", redirectUri);
+  //set redirect uri in sessionStorage (tab-scoped, cleared on tab close)
+  sessionStorage.setItem("redirectUri", redirectUri);
 }
 
 function getRedirectURI() {
-  return localStorage.getItem("redirectUri");
+  return sessionStorage.getItem("redirectUri");
 }
 
-// Generate the Cognito hosted UI URL
+// Generate the Cognito OAuth authorize URL with SAML identity provider
+// Uses /authorize (not /login) to skip the Cognito hosted UI and redirect
+// directly to the configured SAML IdP (e.g., Azure AD / Entra ID)
 export function getLoginUrl() {
   const params = new URLSearchParams({
     client_id: COGNITO_CONFIG.clientId,
     response_type: "code",
     scope: "email openid profile",
     redirect_uri: getRedirectURI(),
+    identity_provider: COGNITO_CONFIG.samlProviderName,
   });
 
-  return `${COGNITO_CONFIG.cognitoDomain}/login?${params.toString()}`;
+  return `${COGNITO_CONFIG.cognitoDomain}/authorize?${params.toString()}`;
 }
 
 // Handle the redirect from Cognito
@@ -36,7 +48,7 @@ export async function handleRedirect() {
     try {
       // Exchange the code for tokens
       const tokens = await getTokens(code);
-      // Store tokens
+      // Store tokens in memory
       setTokens(tokens);
       // Remove code from URL
       window.history.replaceState({}, document.title, window.location.pathname);
@@ -102,22 +114,23 @@ async function getTokens(code) {
   return tokens;
 }
 
-// Store tokens in localStorage
+// Store tokens in the in-memory token store (not localStorage)
 function setTokens(tokens) {
-  localStorage.setItem("accessToken", tokens.access_token);
-  localStorage.setItem("idToken", tokens.id_token);
+  tokenStore.accessToken = tokens.access_token;
+  tokenStore.idToken = tokens.id_token;
   if (tokens.refresh_token) {
-    localStorage.setItem("refreshToken", tokens.refresh_token);
+    tokenStore.refreshToken = tokens.refresh_token;
   }
 }
 
+// Store AWS credentials in sessionStorage (tab-scoped, cleared on tab close)
 function setAwsCredentials(awsCredentials) {
-  localStorage.setItem("awsCredentials", JSON.stringify(awsCredentials));
+  sessionStorage.setItem("awsCredentials", JSON.stringify(awsCredentials));
 }
 
 function getAwsCredentials() {
-  const awsCredentials = localStorage.getItem("awsCredentials");
-  return JSON.parse(awsCredentials);
+  const awsCredentials = sessionStorage.getItem("awsCredentials");
+  return awsCredentials ? JSON.parse(awsCredentials) : null;
 }
 
 export function isTokenExpired(token) {
@@ -133,13 +146,13 @@ export function isTokenExpired(token) {
     // Check if token has expired
     return payload.exp < currentTime;
   } catch (error) {
-    console.error(`${LOGGER_PREFIX} - getAwsCredentials - Error checking token expiration:`, error);
+    console.error(`${LOGGER_PREFIX} - isTokenExpired - Error checking token expiration:`, error);
     return true;
   }
 }
 
 export async function refreshTokens() {
-  const refreshToken = localStorage.getItem("refreshToken");
+  const refreshToken = tokenStore.refreshToken;
   try {
     if (refreshToken == null) {
       throw new Error("No refresh token available");
@@ -181,11 +194,11 @@ export async function refreshTokens() {
   }
 }
 
-// Update isAuthenticated to check expiration
+// Update isAuthenticated to check in-memory tokens
 export function isAuthenticated() {
-  const idToken = localStorage.getItem("idToken");
-  const accessToken = localStorage.getItem("accessToken");
-  const refreshToken = localStorage.getItem("refreshToken");
+  const idToken = tokenStore.idToken;
+  const accessToken = tokenStore.accessToken;
+  const refreshToken = tokenStore.refreshToken;
   if (idToken == null || accessToken == null || refreshToken == null) return false;
   if (isTokenExpired(idToken) || isTokenExpired(accessToken)) return false;
   return true;
@@ -193,9 +206,9 @@ export function isAuthenticated() {
 
 // Get valid access token (refreshing if needed)
 export async function getValidTokens() {
-  const idToken = localStorage.getItem("idToken");
-  const accessToken = localStorage.getItem("accessToken");
-  const refreshToken = localStorage.getItem("refreshToken");
+  const idToken = tokenStore.idToken;
+  const accessToken = tokenStore.accessToken;
+  const refreshToken = tokenStore.refreshToken;
 
   if (refreshToken == null) {
     console.error(`${LOGGER_PREFIX} - getValidTokens - No refresh token available`);
@@ -215,9 +228,9 @@ export async function getValidTokens() {
     }
   }
   return {
-    accessToken: localStorage.getItem("accessToken"),
-    idToken: localStorage.getItem("idToken"),
-    refreshToken: localStorage.getItem("refreshToken"),
+    accessToken: tokenStore.accessToken,
+    idToken: tokenStore.idToken,
+    refreshToken: tokenStore.refreshToken,
   };
 }
 
@@ -233,7 +246,7 @@ export function decodeToken(token) {
 
 // Get user info from token
 export function getUserInfo() {
-  const token = localStorage.getItem("idToken");
+  const token = tokenStore.idToken;
   if (!token) return null;
 
   const payload = decodeToken(token);
@@ -245,8 +258,8 @@ export function getUserInfo() {
 }
 
 export function startTokenRefreshTimer() {
-  const idToken = localStorage.getItem("idToken");
-  const accessToken = localStorage.getItem("accessToken");
+  const idToken = tokenStore.idToken;
+  const accessToken = tokenStore.accessToken;
 
   if (idToken == null || accessToken == null) throw new Error("Unable to startTokenRefreshTimer - No tokens available");
 
@@ -282,13 +295,16 @@ export function logout() {
     logout_uri: getRedirectURI(),
   });
 
-  // Clear local storage
-  localStorage.removeItem("accessToken");
-  localStorage.removeItem("idToken");
-  localStorage.removeItem("refreshToken");
-  localStorage.removeItem("awsCredentials");
+  // Clear in-memory tokens
+  tokenStore.accessToken = null;
+  tokenStore.idToken = null;
+  tokenStore.refreshToken = null;
 
-  // Redirect to Cognito logout
+  // Clear sessionStorage
+  sessionStorage.removeItem("awsCredentials");
+  sessionStorage.removeItem("redirectUri");
+
+  // Redirect to Cognito logout (which triggers SAML IdP single logout if configured)
   window.location.href = `${COGNITO_CONFIG.cognitoDomain}/logout?${params.toString()}`;
 }
 
@@ -374,7 +390,7 @@ export async function getValidAwsCredentials() {
       return getAwsCredentials();
     }
 
-    const refreshToken = localStorage.getItem("refreshToken");
+    const refreshToken = tokenStore.refreshToken;
     if (refreshToken == null) {
       return await getUnauthenticatedCredentials();
     }
@@ -409,9 +425,6 @@ export function hasValidAwsCredentials() {
   const bufferTime = 15 * 60 * 1000; // 15 minutes in milliseconds
   const currentTime = new Date();
   const expirationTime = new Date(awsCredentials.expiration);
-  // console.info(
-  //   `${LOGGER_PREFIX} - hasValidAwsCredentials - AWS Credentials expiration: ${expirationTime.toISOString()}`
-  // );
 
   return currentTime.getTime() + bufferTime < expirationTime.getTime();
 }

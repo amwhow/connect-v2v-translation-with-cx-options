@@ -4,6 +4,7 @@ export const COGNITO_CONFIG = {
   identityPoolId: getParamValue(window.WebappConfig.identityPoolId),
   userPoolId: getParamValue(window.WebappConfig.userPoolId),
   clientId: getParamValue(window.WebappConfig.userPoolWebClientId),
+  samlProviderName: getParamValue(window.WebappConfig.samlProviderName),
 };
 
 export const CONNECT_CONFIG = {
